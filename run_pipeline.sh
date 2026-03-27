@@ -308,9 +308,16 @@ log_info "Params file: ${PARAMS_FILE}"
 log_timer_start "Step 1: Phenotype preparation"
 log_step "Step 1: Phenotype preparation"
 
+set +e
 python3 "${PIPELINE_DIR}/scripts/01_prep_phenotypes.py" \
     --params "${PARAMS_FILE}" \
     --outdir "${OUTDIR}/phenotypes"
+STEP_EXIT=$?
+set -e
+
+if [[ ${STEP_EXIT} -ne 0 ]]; then
+    die "Step 1 failed (exit=${STEP_EXIT}). Cannot continue without phenotype files."
+fi
 
 log_timer_end "Step 1: Phenotype preparation"
 
@@ -326,9 +333,27 @@ log_info "Phenotype files created: ${N_PHENO_FILES}"
 log_timer_start "Step 2: R² filtering"
 log_step "Step 2: R² filtering (threshold=${R2_THRESHOLD})"
 
+set +e
 bash "${PIPELINE_DIR}/scripts/02_filter_vcf.sh"
+STEP_EXIT=$?
+set -e
 
+if [[ ${STEP_EXIT} -ne 0 ]]; then
+    log_warn "Step 2 exited with code ${STEP_EXIT} — checking if outputs exist"
+fi
 log_timer_end "Step 2: R² filtering"
+
+# Verify filtered VCFs exist before proceeding
+N_FILTERED=0
+for ds_dir in "${OUTDIR}/filtered_vcf"/*/; do
+    for vcf in "${ds_dir}"*.filtered.vcf.gz; do
+        [[ -f "${vcf}" ]] && N_FILTERED=$((N_FILTERED + 1))
+    done
+done
+log_info "Filtered VCF files found: ${N_FILTERED}"
+if [[ ${N_FILTERED} -eq 0 ]]; then
+    die "No filtered VCF files produced. Check logs in ${OUTDIR}/logs/filter_*.log"
+fi
 
 # =============================================================================
 # STEP 3: Per-dataset GWAS
@@ -336,8 +361,14 @@ log_timer_end "Step 2: R² filtering"
 log_timer_start "Step 3: Per-dataset GWAS"
 log_step "Step 3: Per-dataset GWAS (PLINK2 --glm firth-fallback)"
 
+set +e
 bash "${PIPELINE_DIR}/scripts/03_run_gwas.sh"
+STEP_EXIT=$?
+set -e
 
+if [[ ${STEP_EXIT} -ne 0 ]]; then
+    log_warn "Step 3 exited with code ${STEP_EXIT} — checking if outputs exist"
+fi
 log_timer_end "Step 3: Per-dataset GWAS"
 
 # =============================================================================
@@ -346,11 +377,17 @@ log_timer_end "Step 3: Per-dataset GWAS"
 log_timer_start "Step 4: Merge per-chromosome GWAS results"
 log_step "Step 4: Merge per-chromosome results"
 
+set +e
 python3 "${PIPELINE_DIR}/scripts/04_merge_results.py" \
     --params "${PARAMS_FILE}" \
     --gwas-dir "${OUTDIR}/gwas" \
     --outdir "${OUTDIR}/gwas"
+STEP_EXIT=$?
+set -e
 
+if [[ ${STEP_EXIT} -ne 0 ]]; then
+    log_error "Step 4 failed (exit=${STEP_EXIT})"
+fi
 log_timer_end "Step 4: Merge per-chromosome GWAS results"
 
 # =============================================================================
@@ -359,11 +396,17 @@ log_timer_end "Step 4: Merge per-chromosome GWAS results"
 log_timer_start "Step 5: Meta-analysis"
 log_step "Step 5: Meta-analysis (METAL IVW fixed-effects)"
 
+set +e
 python3 "${PIPELINE_DIR}/scripts/05_run_metal.py" \
     --params "${PARAMS_FILE}" \
     --gwas-dir "${OUTDIR}/gwas" \
     --outdir "${OUTDIR}/metal"
+STEP_EXIT=$?
+set -e
 
+if [[ ${STEP_EXIT} -ne 0 ]]; then
+    log_error "Step 5 failed (exit=${STEP_EXIT})"
+fi
 log_timer_end "Step 5: Meta-analysis"
 
 # =============================================================================
@@ -372,11 +415,17 @@ log_timer_end "Step 5: Meta-analysis"
 log_timer_start "Step 6: Post-meta QC"
 log_step "Step 6: Post-meta QC and final summary statistics"
 
+set +e
 python3 "${PIPELINE_DIR}/scripts/06_post_meta_qc.py" \
     --params "${PARAMS_FILE}" \
     --metal-dir "${OUTDIR}/metal" \
     --outdir "${OUTDIR}/final"
+STEP_EXIT=$?
+set -e
 
+if [[ ${STEP_EXIT} -ne 0 ]]; then
+    log_error "Step 6 failed (exit=${STEP_EXIT})"
+fi
 log_timer_end "Step 6: Post-meta QC"
 
 # =============================================================================
@@ -385,11 +434,18 @@ log_timer_end "Step 6: Post-meta QC"
 log_timer_start "Step 7: Plots and tables"
 log_step "Step 7: Generating plots and publication tables"
 
+set +e
 python3 "${PIPELINE_DIR}/scripts/07_plots.py" \
     --params "${PARAMS_FILE}" \
     --final-dir "${OUTDIR}/final" \
     --gwas-dir "${OUTDIR}/gwas" \
     --outdir "${OUTDIR}/final/plots"
+STEP_EXIT=$?
+set -e
+
+if [[ ${STEP_EXIT} -ne 0 ]]; then
+    log_error "Step 7 failed (exit=${STEP_EXIT})"
+fi
 
 log_timer_end "Step 7: Plots and tables"
 
