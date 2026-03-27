@@ -8,8 +8,6 @@
 # Expected environment variables (set by run_pipeline.sh):
 #   OUTDIR, PIPELINE_DIR, R2_THRESHOLD, CHROMOSOMES,
 #   PARALLEL_JOBS, PLINK_THREADS
-#
-# Reads dataset info from: ${OUTDIR}/logs/params.tsv
 # =============================================================================
 source "${PIPELINE_DIR}/scripts/utils/logging_utils.sh"
 
@@ -44,7 +42,7 @@ log_info "Chromosomes: ${CHROMOSOMES}"
 log_info "R² threshold: ${R2_THRESHOLD}"
 
 # Build task list: dataset,chromosome pairs
-TASK_FILE="${OUTDIR}/logs/filter_tasks.txt"
+TASK_FILE="${LOG_DIR}/filter_tasks.txt"
 > "${TASK_FILE}"
 
 N_TASKS=0
@@ -76,18 +74,13 @@ filter_one_vcf() {
     local out_vcf="${FILTER_DIR}/${ds}/chr${chr}.dose.filtered.vcf.gz"
     local log_file="${LOG_DIR}/filter_${ds}_chr${chr}.log"
 
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO]  Filtering ${ds} chr${chr} (R²>=${R2_THRESHOLD})" | tee "${log_file}"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO]  START filtering ${ds} chr${chr} (R²>=${R2_THRESHOLD})" > "${log_file}"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO]  Input: ${vcf} ($(du -h "${vcf}" | cut -f1))" >> "${log_file}"
 
-    # Count variants before filtering
-    local n_before
-    n_before=$(bcftools view -H "${vcf}" 2>/dev/null | wc -l)
-
-    # Filter by R2 in INFO field
-    # Michigan Imputation Server stores R2 as INFO/R2
-    # Some servers use INFO/INFO or INFO/DR2 — we check for common field names
+    # Detect R² field name from VCF header
     local r2_field=""
     local header_line
-    header_line=$(bcftools view -h "${vcf}" 2>/dev/null | tail -50)
+    header_line=$(bcftools view -h "${vcf}" 2>>"${log_file}" | tail -50)
 
     if echo "${header_line}" | grep -q 'ID=R2,'; then
         r2_field="R2"
@@ -98,7 +91,7 @@ filter_one_vcf() {
     fi
 
     if [[ -z "${r2_field}" ]]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WARN]  No R² field found in ${vcf} — copying unfiltered" >> "${log_file}"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WARN]  No R² field found — copying unfiltered" >> "${log_file}"
         cp "${vcf}" "${out_vcf}"
         if [[ -f "${vcf}.tbi" ]]; then
             cp "${vcf}.tbi" "${out_vcf}.tbi"
@@ -106,20 +99,29 @@ filter_one_vcf() {
             bcftools index -t "${out_vcf}" 2>>"${log_file}"
         fi
     else
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO]  Filtering on ${r2_field} >= ${R2_THRESHOLD}" >> "${log_file}"
+
         bcftools view \
             -i "${r2_field}>=${R2_THRESHOLD}" \
             -Oz -o "${out_vcf}" \
             "${vcf}" \
             2>>"${log_file}"
 
+        local bcf_exit=$?
+        if [[ ${bcf_exit} -ne 0 ]]; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ERROR] bcftools view failed (exit=${bcf_exit})" >> "${log_file}"
+            return 1
+        fi
+
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO]  Indexing output" >> "${log_file}"
         bcftools index -t "${out_vcf}" 2>>"${log_file}"
     fi
 
-    local n_after
-    n_after=$(bcftools view -H "${out_vcf}" 2>/dev/null | wc -l)
-    local n_removed=$((n_before - n_after))
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO]  Output: ${out_vcf} ($(du -h "${out_vcf}" | cut -f1))" >> "${log_file}"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO]  DONE ${ds} chr${chr}" >> "${log_file}"
 
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO]  ${ds} chr${chr}: ${n_before} → ${n_after} variants (${n_removed} removed)" | tee -a "${log_file}"
+    # Also print to stdout so parallel and the master log see progress
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO]  DONE ${ds} chr${chr}: $(du -h "${out_vcf}" | cut -f1)"
 }
 
 export -f filter_one_vcf
@@ -132,25 +134,33 @@ log_separator
 parallel --colsep '\t' \
     --jobs "${PARALLEL_JOBS}" \
     --joblog "${LOG_DIR}/filter_parallel.log" \
-    --halt soon,fail=1 \
-    --progress \
+    --halt soon,fail=20% \
+    --verbose \
     filter_one_vcf {1} {2} {3} \
     :::: "${TASK_FILE}"
 
+PARALLEL_EXIT=$?
 log_separator
 
-# Summary: count total variants per dataset
+if [[ ${PARALLEL_EXIT} -ne 0 ]]; then
+    log_warn "Some filtering jobs may have failed (parallel exit=${PARALLEL_EXIT})"
+    log_warn "Check individual logs in ${LOG_DIR}/filter_*.log"
+fi
+
+# Summary: report output file sizes per dataset
 log_substep "R² filtering summary"
 for ds in "${ACTIVE_DATASETS[@]}"; do
-    total=0
+    n_files=0
     for chr in ${CHROMOSOMES}; do
         vcf="${FILTER_DIR}/${ds}/chr${chr}.dose.filtered.vcf.gz"
         if [[ -f "${vcf}" ]]; then
-            n=$(bcftools view -H "${vcf}" 2>/dev/null | wc -l)
-            total=$((total + n))
+            n_files=$((n_files + 1))
+            log_info "  ${ds} chr${chr}: $(du -h "${vcf}" | cut -f1)"
+        else
+            log_warn "  ${ds} chr${chr}: MISSING"
         fi
     done
-    log_info "  ${ds}: ${total} variants after R² filtering"
+    log_info "  ${ds}: ${n_files} filtered chromosome files"
 done
 
 log_info "R² filtering complete"
