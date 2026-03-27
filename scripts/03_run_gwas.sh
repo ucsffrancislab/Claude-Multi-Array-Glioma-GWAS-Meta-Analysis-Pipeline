@@ -97,9 +97,9 @@ run_one_gwas() {
         awk -F'\t' 'NR>1 {print $1, $2}' "${pheno_file}" > "${keep_file}"
     fi
 
-        #--1 \
     plink2 \
         --vcf "${vcf}" dosage=DS \
+        --double-id \
         --keep "${keep_file}" \
         --pheno "${pheno_file}" \
         --pheno-name pheno \
