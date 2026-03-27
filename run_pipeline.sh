@@ -14,12 +14,14 @@
 
 # --- Parse arguments BEFORE set -e so usage errors print cleanly ---
 
+# Default PIPELINE_DIR from script location (works interactively, breaks under SLURM).
+# Override with --pipeline-dir when submitting via sbatch.
 PIPELINE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 OUTDIR=""
 IDH_SUBTYPE=""
 PQ_SUBTYPE=""
-DATASETS_CONFIG="${PIPELINE_DIR}/config/datasets.tsv"
+DATASETS_CONFIG=""
 R2_THRESHOLD=0.3
 NUM_PCS=8
 THREADS="${SLURM_CPUS_PER_TASK:-16}"
@@ -34,6 +36,7 @@ Usage: $(basename "$0") [OPTIONS]
 Required:
   --outdir DIR              Output directory (must be unique per run)
   --datasets-config FILE    TSV with dataset/vcf_dir/covariate_file columns
+  --pipeline-dir DIR        Path to pipeline install directory [default: dirname of this script]
 
 Case definition (combine to define subtype):
   --idh-subtype TYPE        wt or mt (omit for all glioma)
@@ -55,6 +58,7 @@ while [[ $# -gt 0 ]]; do
         --idh-subtype)      IDH_SUBTYPE="$2";      shift 2 ;;
         --pq-subtype)       PQ_SUBTYPE="$2";       shift 2 ;;
         --datasets-config)  DATASETS_CONFIG="$2";  shift 2 ;;
+        --pipeline-dir)     PIPELINE_DIR="$2";     shift 2 ;;
         --r2-threshold)     R2_THRESHOLD="$2";     shift 2 ;;
         --pcs)              NUM_PCS="$2";          shift 2 ;;
         --threads)          THREADS="$2";          shift 2 ;;
@@ -72,6 +76,18 @@ if [[ -z "${OUTDIR}" ]]; then
     echo "ERROR: --outdir is required" >&2
     print_usage >&2
     exit 1
+fi
+
+if [[ ! -d "${PIPELINE_DIR}/scripts" ]]; then
+    echo "ERROR: Pipeline scripts not found in: ${PIPELINE_DIR}/scripts" >&2
+    echo "  SLURM copies scripts to a temp dir, breaking relative paths." >&2
+    echo "  Use --pipeline-dir /path/to/gwas_meta_pipeline" >&2
+    exit 1
+fi
+
+# Default datasets-config if not explicitly provided
+if [[ -z "${DATASETS_CONFIG}" ]]; then
+    DATASETS_CONFIG="${PIPELINE_DIR}/config/datasets.tsv"
 fi
 
 if [[ ! -f "${DATASETS_CONFIG}" ]]; then
@@ -184,6 +200,16 @@ log_info "Parallelism: ${PARALLEL_JOBS} concurrent jobs x ${PLINK_THREADS} threa
 
 PLINK_MEMORY=$(( MEMORY / PARALLEL_JOBS ))
 log_info "Per-job memory: ${PLINK_MEMORY} MB"
+
+# =============================================================================
+# Load environment modules
+# =============================================================================
+if command -v module &>/dev/null; then
+    log_substep "Loading environment modules"
+    module load plink2 2>&1 && log_info "  Loaded: plink2" || log_warn "  module load plink2 failed"
+else
+    log_info "No module system detected — assuming tools are in PATH"
+fi
 
 # =============================================================================
 # Check required tools
