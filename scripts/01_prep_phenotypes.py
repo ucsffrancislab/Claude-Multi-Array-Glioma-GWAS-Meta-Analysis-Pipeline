@@ -206,14 +206,60 @@ def main():
         # Encode sex: F=0, M=1
         sex_map = {"F": 0, "f": 0, "M": 1, "m": 1, 0: 0, 1: 1, 2: 0}
         df["sex_coded"] = df["sex"].map(sex_map)
-        n_sex_missing = df["sex_coded"].isna().sum()
-        if n_sex_missing > 0:
-            log_warn(f"  {n_sex_missing} samples with unknown sex — will be excluded by PLINK2")
 
-        # Validate age
-        n_age_missing = df["age"].isna().sum()
-        if n_age_missing > 0:
-            log_warn(f"  {n_age_missing} samples with missing age — will be excluded by PLINK2")
+        # Validate age (ensure numeric)
+        if "age" in df.columns:
+            df["age"] = pd.to_numeric(df["age"], errors="coerce")
+
+        # ---------------------------------------------------------
+        # Covariate missingness check
+        # For each optional covariate (age, sex_coded, and any future
+        # ones like grade), check missingness in cases and controls
+        # separately. If either group exceeds the threshold, drop
+        # that covariate for this dataset.
+        # PCs are exempt (should always be present).
+        # IDH/1p19q/case are phenotype definitions, not covariates.
+        # ---------------------------------------------------------
+        COVAR_MISSING_THRESHOLD = 0.50  # drop if >50% missing in cases OR controls
+
+        # Covariates to check (add future ones like "grade" here)
+        checkable_covars = ["age", "sex_coded"]
+        dropped_covars = []
+        kept_covars = []
+
+        cases_mask = df["pheno"] == 2
+        ctrls_mask = df["pheno"] == 1
+
+        for covar in checkable_covars:
+            if covar not in df.columns:
+                log_info(f"  Covariate '{covar}' not in data — skipping")
+                dropped_covars.append(covar)
+                continue
+
+            n_case_missing = df.loc[cases_mask, covar].isna().sum()
+            n_ctrl_missing = df.loc[ctrls_mask, covar].isna().sum()
+            n_case_total = cases_mask.sum()
+            n_ctrl_total = ctrls_mask.sum()
+
+            pct_case_missing = n_case_missing / n_case_total if n_case_total > 0 else 0
+            pct_ctrl_missing = n_ctrl_missing / n_ctrl_total if n_ctrl_total > 0 else 0
+
+            if pct_case_missing > COVAR_MISSING_THRESHOLD or pct_ctrl_missing > COVAR_MISSING_THRESHOLD:
+                log_warn(
+                    f"  Dropping covariate '{covar}' for {ds}: "
+                    f"missing in {pct_case_missing:.0%} of cases ({n_case_missing}/{n_case_total}), "
+                    f"{pct_ctrl_missing:.0%} of controls ({n_ctrl_missing}/{n_ctrl_total}) "
+                    f"— exceeds {COVAR_MISSING_THRESHOLD:.0%} threshold"
+                )
+                dropped_covars.append(covar)
+            else:
+                if n_case_missing > 0 or n_ctrl_missing > 0:
+                    log_info(
+                        f"  Covariate '{covar}': missing in "
+                        f"{n_case_missing}/{n_case_total} cases, "
+                        f"{n_ctrl_missing}/{n_ctrl_total} controls — keeping"
+                    )
+                kept_covars.append(covar)
 
         # Build output dataframe
         # PLINK2 expects: #FID IID pheno covar1 covar2 ...
@@ -225,7 +271,7 @@ def main():
             log_warn(f"  Requested {num_pcs} PCs but only {len(available_pcs)} found in covariate file")
             pc_cols = available_pcs
 
-        out_cols = ["#FID", "IID", "pheno", "age", "sex_coded"]
+        out_cols = ["#FID", "IID", "pheno"] + kept_covars
         if adjust_source:
             out_cols.append("source")
         out_cols.extend(pc_cols)
@@ -234,8 +280,9 @@ def main():
         out_df["#FID"] = df["IID"].values  # Use IID as FID (no family structure)
         out_df["IID"] = df["IID"].values
         out_df["pheno"] = df["pheno"].astype(int).values
-        out_df["age"] = df["age"].values
-        out_df["sex_coded"] = df["sex_coded"].values
+
+        for covar in kept_covars:
+            out_df[covar] = df[covar].values
 
         if adjust_source:
             # Dummy-code source (PLINK2 doesn't handle categorical covariates)
@@ -277,11 +324,13 @@ def main():
             "n_cases": n_cases,
             "n_controls": n_controls,
             "n_total": n_cases + n_controls,
-            "mean_age_cases": f"{cases_df['age'].mean():.1f}" if not cases_df["age"].isna().all() else "NA",
-            "mean_age_controls": f"{ctrls_df['age'].mean():.1f}" if not ctrls_df["age"].isna().all() else "NA",
+            "mean_age_cases": f"{cases_df['age'].mean():.1f}" if "age" in kept_covars and not cases_df["age"].isna().all() else "NA",
+            "mean_age_controls": f"{ctrls_df['age'].mean():.1f}" if "age" in kept_covars and not ctrls_df["age"].isna().all() else "NA",
             "pct_male_cases": f"{(cases_df['sex'].isin(['M', 'm', 1])).mean() * 100:.1f}",
             "pct_male_controls": f"{(ctrls_df['sex'].isin(['M', 'm', 1])).mean() * 100:.1f}",
             "adjust_source": adjust_source,
+            "covariates_used": ",".join(kept_covars),
+            "covariates_dropped": ",".join(dropped_covars) if dropped_covars else "none",
         })
 
     # Write summary tables
