@@ -183,6 +183,82 @@ def main():
 
     final = pd.DataFrame(out_cols)
 
+    # ---------------------------------------------------------
+    # Per-variant case and control counts
+    # Load per-dataset merged files and sum N_CASES / N_CONTROLS
+    # for each variant based on which datasets contributed
+    # (using the Direction string from METAL)
+    # ---------------------------------------------------------
+    log_substep("Computing per-variant case/control counts")
+    gwas_dir = os.path.dirname(args.metal_dir.rstrip("/"))
+    gwas_dir = os.path.join(gwas_dir, "gwas")
+
+    # Determine dataset order (same order as Direction string)
+    ds_names = params["ds_names"]
+    # Only include datasets that had merged results (same order as METAL input)
+    active_ds = []
+    for ds in ds_names:
+        merged_file = os.path.join(gwas_dir, f"{ds}_merged.tsv")
+        if os.path.exists(merged_file):
+            active_ds.append(ds)
+
+    log_info(f"  Active datasets for count lookup: {active_ds}")
+
+    # Load per-dataset case/control counts indexed by SNP
+    ds_counts = {}
+    for ds in active_ds:
+        merged_file = os.path.join(gwas_dir, f"{ds}_merged.tsv")
+        cols_to_load = ["SNP"]
+        # Peek at header to check which columns exist
+        with open(merged_file) as fh:
+            header_cols = fh.readline().strip().split("\t")
+
+        if "N_CASES" in header_cols and "N_CONTROLS" in header_cols:
+            cols_to_load.extend(["N_CASES", "N_CONTROLS"])
+            ds_df = pd.read_csv(merged_file, sep="\t", usecols=cols_to_load)
+            ds_df = ds_df.set_index("SNP")
+            ds_counts[ds] = ds_df
+            log_info(f"  {ds}: loaded per-variant case/control counts ({len(ds_df)} variants)")
+        else:
+            log_warn(f"  {ds}: N_CASES/N_CONTROLS columns not found in merged file — skipping")
+
+    if ds_counts and "Direction" in final.columns:
+        # For each variant, sum cases and controls from contributing datasets
+        n_cases_total = np.zeros(len(final), dtype=float)
+        n_controls_total = np.zeros(len(final), dtype=float)
+
+        snps = final["SNP"].values
+        directions = final["DIRECTION"].values
+
+        for var_idx in range(len(final)):
+            snp = snps[var_idx]
+            direction = str(directions[var_idx])
+
+            for ds_idx, ds in enumerate(active_ds):
+                if ds_idx >= len(direction):
+                    break
+                if direction[ds_idx] == "?":
+                    continue  # Dataset did not contribute
+                if ds not in ds_counts:
+                    continue
+
+                ds_df = ds_counts[ds]
+                if snp in ds_df.index:
+                    row = ds_df.loc[snp]
+                    # Handle duplicate SNPs (take first)
+                    if isinstance(row, pd.DataFrame):
+                        row = row.iloc[0]
+                    n_cases_total[var_idx] += row.get("N_CASES", 0)
+                    n_controls_total[var_idx] += row.get("N_CONTROLS", 0)
+
+        final["N_CASES"] = n_cases_total.astype(int)
+        final["N_CONTROLS"] = n_controls_total.astype(int)
+        log_info(f"  Added N_CASES and N_CONTROLS columns")
+        log_info(f"  Median N_CASES={int(np.median(n_cases_total))}, "
+                 f"Median N_CONTROLS={int(np.median(n_controls_total))}")
+    else:
+        log_warn("  Could not compute per-variant case/control counts")
+
     # Sort by chromosome and position
     try:
         final["CHR_NUM"] = pd.to_numeric(

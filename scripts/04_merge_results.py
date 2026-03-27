@@ -135,6 +135,12 @@ def merge_dataset(ds: str, gwas_dir: str, outdir: str) -> str | None:
     if freq_col:
         out["A1_FREQ"] = merged[freq_col]
 
+    # Per-variant case and control counts
+    if "A1_CASE_CT" in merged.columns:
+        out["N_CASES"] = merged["A1_CASE_CT"]
+    if "A1_CTRL_CT" in merged.columns:
+        out["N_CONTROLS"] = merged["A1_CTRL_CT"]
+
     # QC: remove invalid rows
     n_before = len(out)
     out = out.dropna(subset=["BETA", "SE", "P"])
