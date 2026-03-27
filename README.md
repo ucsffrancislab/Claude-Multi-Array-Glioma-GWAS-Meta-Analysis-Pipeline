@@ -159,3 +159,12 @@ tcga       /data/imputed/tcga             /data/covariates/tcga-covariates.csv
 **Genomic control per study:** Corrects residual stratification that PCs may not fully capture before combining studies.
 
 **hg19 throughout:** Matching the imputation reference. Liftover to hg38 can be done downstream if needed.
+
+
+##	References
+
+Claude Operon private beta chat
+
+https://claude.ai/chat/1ff6d67a-f2ea-4a29-9cdf-39a5c758c43c
+
+
