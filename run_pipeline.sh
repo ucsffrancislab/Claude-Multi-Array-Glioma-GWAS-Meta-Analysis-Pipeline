@@ -2,9 +2,6 @@
 # =============================================================================
 # run_pipeline.sh — Glioma GWAS meta-analysis pipeline
 #
-# Runs per-dataset logistic regression (PLINK2) then IVW fixed-effects
-# meta-analysis (METAL) for a single case definition.
-#
 # Usage:
 #   sbatch --job-name=idhmt_intact --ntasks=1 --cpus-per-task=16 \
 #          --mem=120G run_pipeline.sh \
@@ -14,21 +11,19 @@
 #
 # All stdout/stderr is captured in {outdir}/logs/ so SLURM logs stay empty.
 # =============================================================================
-set -euo pipefail
+
+# --- Parse arguments BEFORE set -e so usage errors print cleanly ---
 
 PIPELINE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# =============================================================================
-# Parse arguments
-# =============================================================================
 OUTDIR=""
-IDH_SUBTYPE=""          # wt, mt, or empty (all glioma)
-PQ_SUBTYPE=""           # intact, codel, or empty
+IDH_SUBTYPE=""
+PQ_SUBTYPE=""
 DATASETS_CONFIG="${PIPELINE_DIR}/config/datasets.tsv"
 R2_THRESHOLD=0.3
 NUM_PCS=8
-THREADS=${SLURM_CPUS_PER_TASK:-16}
-MEMORY=${SLURM_MEM_PER_NODE:-120000}   # in MB
+THREADS="${SLURM_CPUS_PER_TASK:-16}"
+MEMORY="${SLURM_MEM_PER_NODE:-120000}"
 MIN_DATASETS=2
 TEST_MODE=0
 
@@ -47,20 +42,10 @@ Case definition (combine to define subtype):
 Optional:
   --r2-threshold FLOAT      Minimum imputation R² per dataset [default: 0.3]
   --pcs INT                 Number of PCs to include as covariates [default: 8]
-  --threads INT             Number of CPUs available [default: \$SLURM_CPUS_PER_TASK or 16]
-  --memory INT              Memory in MB [default: \$SLURM_MEM_PER_NODE or 120000]
+  --threads INT             Number of CPUs available [default: SLURM_CPUS_PER_TASK or 16]
+  --memory INT              Memory in MB [default: SLURM_MEM_PER_NODE or 120000]
   --min-datasets INT        Minimum datasets for meta-analysis [default: 2]
   --test                    Test mode: chr22 only, fast end-to-end validation
-
-Example:
-  # All glioma
-  $(basename "$0") --outdir results/all_glioma --datasets-config config/datasets.tsv
-
-  # IDH wildtype
-  $(basename "$0") --outdir results/idhwt --idh-subtype wt --datasets-config config/datasets.tsv
-
-  # IDH mutant, 1p19q codeleted
-  $(basename "$0") --outdir results/idhmt_codel --idh-subtype mt --pq-subtype codel --datasets-config config/datasets.tsv
 EOF
 }
 
@@ -69,21 +54,20 @@ while [[ $# -gt 0 ]]; do
         --outdir)           OUTDIR="$2";           shift 2 ;;
         --idh-subtype)      IDH_SUBTYPE="$2";      shift 2 ;;
         --pq-subtype)       PQ_SUBTYPE="$2";       shift 2 ;;
-        --datasets-config)  DATASETS_CONFIG="$2";   shift 2 ;;
-        --r2-threshold)     R2_THRESHOLD="$2";      shift 2 ;;
-        --pcs)              NUM_PCS="$2";           shift 2 ;;
-        --threads)          THREADS="$2";           shift 2 ;;
-        --memory)           MEMORY="$2";            shift 2 ;;
-        --min-datasets)     MIN_DATASETS="$2";      shift 2 ;;
-        --test)             TEST_MODE=1;            shift ;;
+        --datasets-config)  DATASETS_CONFIG="$2";  shift 2 ;;
+        --r2-threshold)     R2_THRESHOLD="$2";     shift 2 ;;
+        --pcs)              NUM_PCS="$2";          shift 2 ;;
+        --threads)          THREADS="$2";          shift 2 ;;
+        --memory)           MEMORY="$2";           shift 2 ;;
+        --min-datasets)     MIN_DATASETS="$2";     shift 2 ;;
+        --test)             TEST_MODE=1;           shift ;;
         -h|--help)          print_usage; exit 0 ;;
-        *) echo "Unknown option: $1" >&2; print_usage >&2; exit 1 ;;
+        *) echo "ERROR: Unknown option: $1" >&2; print_usage >&2; exit 1 ;;
     esac
 done
 
-# =============================================================================
-# Validate arguments
-# =============================================================================
+# --- Validate arguments (still before redirect so errors go to SLURM log) ---
+
 if [[ -z "${OUTDIR}" ]]; then
     echo "ERROR: --outdir is required" >&2
     print_usage >&2
@@ -110,7 +94,7 @@ if [[ -n "${PQ_SUBTYPE}" && "${PQ_SUBTYPE}" != "intact" && "${PQ_SUBTYPE}" != "c
     exit 1
 fi
 
-# Build a human-readable label for this case definition
+# Build case label
 CASE_LABEL="all_glioma"
 if [[ "${IDH_SUBTYPE}" == "wt" ]]; then
     CASE_LABEL="IDHwt"
@@ -125,18 +109,29 @@ elif [[ "${IDH_SUBTYPE}" == "mt" ]]; then
 fi
 
 # =============================================================================
-# Create output directories and redirect ALL output
+# Create output directories
 # =============================================================================
-mkdir -p "${OUTDIR}"/{logs,phenotypes,filtered_vcf,gwas,metal,final/plots}
+mkdir -p "${OUTDIR}/logs"
+mkdir -p "${OUTDIR}/phenotypes"
+mkdir -p "${OUTDIR}/filtered_vcf"
+mkdir -p "${OUTDIR}/gwas"
+mkdir -p "${OUTDIR}/metal"
+mkdir -p "${OUTDIR}/final/plots"
 
+# =============================================================================
+# Redirect ALL output to log file
+#
+# Simple and robust: redirect stdout and stderr to a log file via exec.
+# This works reliably under SLURM, sh, bash, interactive, non-interactive.
+# Output goes ONLY to the log file (not to terminal/SLURM .out).
+# =============================================================================
 MASTER_LOG="${OUTDIR}/logs/pipeline_$(date '+%Y%m%d_%H%M%S').log"
+exec >> "${MASTER_LOG}" 2>&1
 
-# Redirect ALL stdout and stderr to the master log
-exec > >(tee -a "${MASTER_LOG}") 2>&1
+# Now enable strict mode (after redirect so errors are captured)
+set -euo pipefail
 
-# =============================================================================
 # Source logging utilities
-# =============================================================================
 source "${PIPELINE_DIR}/scripts/utils/logging_utils.sh"
 
 # =============================================================================
@@ -148,7 +143,7 @@ log_separator
 log_info "Case definition:  ${CASE_LABEL}"
 log_info "IDH subtype:      ${IDH_SUBTYPE:-all}"
 log_info "1p/19q subtype:   ${PQ_SUBTYPE:-all}"
-log_info "Output directory:  ${OUTDIR}"
+log_info "Output directory:  $(cd "${OUTDIR}" && pwd)"
 log_info "Datasets config:   ${DATASETS_CONFIG}"
 log_info "R² threshold:      ${R2_THRESHOLD}"
 log_info "PCs:               ${NUM_PCS}"
@@ -159,13 +154,18 @@ log_info "Test mode:         ${TEST_MODE}"
 log_info "Pipeline dir:      ${PIPELINE_DIR}"
 log_info "Master log:        ${MASTER_LOG}"
 log_info "Started:           $(date)"
+log_info "Hostname:          $(hostname)"
+log_info "Working dir:       $(pwd)"
+log_info "Bash version:      ${BASH_VERSION}"
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then
     log_info "SLURM job ID:      ${SLURM_JOB_ID}"
     log_info "SLURM node:        ${SLURM_NODELIST:-unknown}"
+    log_info "SLURM CPUs:        ${SLURM_CPUS_PER_TASK:-unknown}"
+    log_info "SLURM memory:      ${SLURM_MEM_PER_NODE:-unknown}"
 fi
 log_separator
 
-# Determine chromosomes to process
+# Determine chromosomes
 if [[ ${TEST_MODE} -eq 1 ]]; then
     CHROMOSOMES="22"
     log_warn "TEST MODE: processing chr22 only"
@@ -173,17 +173,15 @@ else
     CHROMOSOMES=$(seq 1 22 | tr '\n' ' ')
 fi
 
-# Calculate parallelism: split threads between parallel jobs and per-job threads
-# Use 2 threads per PLINK2 job, rest for parallelism
+# Calculate parallelism
 PLINK_THREADS=2
 PARALLEL_JOBS=$(( THREADS / PLINK_THREADS ))
 if [[ ${PARALLEL_JOBS} -lt 1 ]]; then
     PARALLEL_JOBS=1
     PLINK_THREADS=${THREADS}
 fi
-log_info "Parallelism: ${PARALLEL_JOBS} concurrent jobs × ${PLINK_THREADS} threads each"
+log_info "Parallelism: ${PARALLEL_JOBS} concurrent jobs x ${PLINK_THREADS} threads each"
 
-# Per-job memory (rough split)
 PLINK_MEMORY=$(( MEMORY / PARALLEL_JOBS ))
 log_info "Per-job memory: ${PLINK_MEMORY} MB"
 
@@ -191,16 +189,25 @@ log_info "Per-job memory: ${PLINK_MEMORY} MB"
 # Check required tools
 # =============================================================================
 log_substep "Checking required tools"
-require_cmd plink2
-require_cmd bcftools
-require_cmd metal
-require_cmd parallel
-require_cmd python3
 
-log_info "plink2:   $(plink2 --version 2>/dev/null | head -1 || echo 'version unknown')"
-log_info "bcftools: $(bcftools --version 2>/dev/null | head -1 || echo 'version unknown')"
-log_info "parallel: $(parallel --version 2>/dev/null | head -1 || echo 'version unknown')"
-log_info "python3:  $(python3 --version 2>/dev/null || echo 'version unknown')"
+MISSING_TOOLS=0
+for tool in plink2 bcftools metal parallel python3; do
+    if command -v "${tool}" &>/dev/null; then
+        log_info "  Found: ${tool} ($(command -v ${tool}))"
+    else
+        log_error "  MISSING: ${tool}"
+        MISSING_TOOLS=1
+    fi
+done
+
+if [[ ${MISSING_TOOLS} -eq 1 ]]; then
+    die "One or more required tools are missing. Check module loads."
+fi
+
+# Log tool versions
+log_info "plink2 version:   $(plink2 --version 2>/dev/null | head -1 || echo 'unknown')"
+log_info "bcftools version: $(bcftools --version 2>/dev/null | head -1 || echo 'unknown')"
+log_info "python3 version:  $(python3 --version 2>/dev/null || echo 'unknown')"
 
 # =============================================================================
 # Parse dataset config
@@ -228,7 +235,9 @@ while IFS=$'\t' read -r ds_name vcf_dir covar_file; do
     DS_NAMES+=("${ds_name}")
     DS_VCF_DIRS["${ds_name}"]="${vcf_dir}"
     DS_COVAR_FILES["${ds_name}"]="${covar_file}"
-    log_info "  Dataset: ${ds_name}  VCF: ${vcf_dir}  Covariates: ${covar_file}"
+    log_info "  Dataset: ${ds_name}"
+    log_info "    VCF dir:    ${vcf_dir}"
+    log_info "    Covariates: ${covar_file}"
 done < "${DATASETS_CONFIG}"
 
 N_DATASETS=${#DS_NAMES[@]}
@@ -243,26 +252,29 @@ export OUTDIR PIPELINE_DIR CASE_LABEL IDH_SUBTYPE PQ_SUBTYPE
 export R2_THRESHOLD NUM_PCS PLINK_THREADS PLINK_MEMORY PARALLEL_JOBS
 export CHROMOSOMES TEST_MODE MIN_DATASETS
 
-# Also write a params file for Python scripts to read
+# Write params file for Python scripts
 PARAMS_FILE="${OUTDIR}/logs/params.tsv"
-cat > "${PARAMS_FILE}" <<EOF
-key	value
-outdir	${OUTDIR}
-case_label	${CASE_LABEL}
-idh_subtype	${IDH_SUBTYPE}
-pq_subtype	${PQ_SUBTYPE}
-r2_threshold	${R2_THRESHOLD}
-num_pcs	${NUM_PCS}
-min_datasets	${MIN_DATASETS}
-test_mode	${TEST_MODE}
-chromosomes	${CHROMOSOMES}
-n_datasets	${N_DATASETS}
-EOF
+{
+    printf "key\tvalue\n"
+    printf "outdir\t%s\n" "${OUTDIR}"
+    printf "case_label\t%s\n" "${CASE_LABEL}"
+    printf "idh_subtype\t%s\n" "${IDH_SUBTYPE}"
+    printf "pq_subtype\t%s\n" "${PQ_SUBTYPE}"
+    printf "r2_threshold\t%s\n" "${R2_THRESHOLD}"
+    printf "num_pcs\t%s\n" "${NUM_PCS}"
+    printf "min_datasets\t%s\n" "${MIN_DATASETS}"
+    printf "test_mode\t%s\n" "${TEST_MODE}"
+    printf "chromosomes\t%s\n" "${CHROMOSOMES}"
+    printf "n_datasets\t%s\n" "${N_DATASETS}"
+} > "${PARAMS_FILE}"
+
 for ds in "${DS_NAMES[@]}"; do
-    echo -e "ds_name\t${ds}" >> "${PARAMS_FILE}"
-    echo -e "ds_vcf_dir_${ds}\t${DS_VCF_DIRS[$ds]}" >> "${PARAMS_FILE}"
-    echo -e "ds_covar_${ds}\t${DS_COVAR_FILES[$ds]}" >> "${PARAMS_FILE}"
+    printf "ds_name\t%s\n" "${ds}" >> "${PARAMS_FILE}"
+    printf "ds_vcf_dir_%s\t%s\n" "${ds}" "${DS_VCF_DIRS[$ds]}" >> "${PARAMS_FILE}"
+    printf "ds_covar_%s\t%s\n" "${ds}" "${DS_COVAR_FILES[$ds]}" >> "${PARAMS_FILE}"
 done
+
+log_info "Params file: ${PARAMS_FILE}"
 
 # =============================================================================
 # STEP 1: Prepare phenotype files
@@ -272,12 +284,10 @@ log_step "Step 1: Phenotype preparation"
 
 python3 "${PIPELINE_DIR}/scripts/01_prep_phenotypes.py" \
     --params "${PARAMS_FILE}" \
-    --outdir "${OUTDIR}/phenotypes" \
-    2>&1
+    --outdir "${OUTDIR}/phenotypes"
 
 log_timer_end "Step 1: Phenotype preparation"
 
-# Check that at least MIN_DATASETS produced phenotype files
 N_PHENO_FILES=$(find "${OUTDIR}/phenotypes" -name "*.pheno" 2>/dev/null | wc -l)
 if [[ ${N_PHENO_FILES} -lt ${MIN_DATASETS} ]]; then
     die "Only ${N_PHENO_FILES} datasets have sufficient samples. Need ${MIN_DATASETS}."
@@ -285,22 +295,22 @@ fi
 log_info "Phenotype files created: ${N_PHENO_FILES}"
 
 # =============================================================================
-# STEP 2: Filter VCFs by R² (parallelized across datasets × chromosomes)
+# STEP 2: Filter VCFs by R²
 # =============================================================================
 log_timer_start "Step 2: R² filtering"
 log_step "Step 2: R² filtering (threshold=${R2_THRESHOLD})"
 
-bash "${PIPELINE_DIR}/scripts/02_filter_vcf.sh" 2>&1
+bash "${PIPELINE_DIR}/scripts/02_filter_vcf.sh"
 
 log_timer_end "Step 2: R² filtering"
 
 # =============================================================================
-# STEP 3: Per-dataset GWAS (parallelized across datasets × chromosomes)
+# STEP 3: Per-dataset GWAS
 # =============================================================================
 log_timer_start "Step 3: Per-dataset GWAS"
 log_step "Step 3: Per-dataset GWAS (PLINK2 --glm firth-fallback)"
 
-bash "${PIPELINE_DIR}/scripts/03_run_gwas.sh" 2>&1
+bash "${PIPELINE_DIR}/scripts/03_run_gwas.sh"
 
 log_timer_end "Step 3: Per-dataset GWAS"
 
@@ -313,8 +323,7 @@ log_step "Step 4: Merge per-chromosome results"
 python3 "${PIPELINE_DIR}/scripts/04_merge_results.py" \
     --params "${PARAMS_FILE}" \
     --gwas-dir "${OUTDIR}/gwas" \
-    --outdir "${OUTDIR}/gwas" \
-    2>&1
+    --outdir "${OUTDIR}/gwas"
 
 log_timer_end "Step 4: Merge per-chromosome GWAS results"
 
@@ -327,13 +336,12 @@ log_step "Step 5: Meta-analysis (METAL IVW fixed-effects)"
 python3 "${PIPELINE_DIR}/scripts/05_run_metal.py" \
     --params "${PARAMS_FILE}" \
     --gwas-dir "${OUTDIR}/gwas" \
-    --outdir "${OUTDIR}/metal" \
-    2>&1
+    --outdir "${OUTDIR}/metal"
 
 log_timer_end "Step 5: Meta-analysis"
 
 # =============================================================================
-# STEP 6: Post-meta QC and final formatting
+# STEP 6: Post-meta QC
 # =============================================================================
 log_timer_start "Step 6: Post-meta QC"
 log_step "Step 6: Post-meta QC and final summary statistics"
@@ -341,13 +349,12 @@ log_step "Step 6: Post-meta QC and final summary statistics"
 python3 "${PIPELINE_DIR}/scripts/06_post_meta_qc.py" \
     --params "${PARAMS_FILE}" \
     --metal-dir "${OUTDIR}/metal" \
-    --outdir "${OUTDIR}/final" \
-    2>&1
+    --outdir "${OUTDIR}/final"
 
 log_timer_end "Step 6: Post-meta QC"
 
 # =============================================================================
-# STEP 7: Plots and publication tables
+# STEP 7: Plots and tables
 # =============================================================================
 log_timer_start "Step 7: Plots and tables"
 log_step "Step 7: Generating plots and publication tables"
@@ -356,8 +363,7 @@ python3 "${PIPELINE_DIR}/scripts/07_plots.py" \
     --params "${PARAMS_FILE}" \
     --final-dir "${OUTDIR}/final" \
     --gwas-dir "${OUTDIR}/gwas" \
-    --outdir "${OUTDIR}/final/plots" \
-    2>&1
+    --outdir "${OUTDIR}/final/plots"
 
 log_timer_end "Step 7: Plots and tables"
 
@@ -367,19 +373,20 @@ log_timer_end "Step 7: Plots and tables"
 log_separator
 log_step "Pipeline complete"
 log_separator
-log_info "Case definition:  ${CASE_LABEL}"
-log_info "Output directory:  ${OUTDIR}"
-log_info "Final summary stats: ${OUTDIR}/final/${CASE_LABEL}_meta_summary_stats.tsv.gz"
+log_info "Case definition:   ${CASE_LABEL}"
+log_info "Output directory:   ${OUTDIR}"
+log_info "Summary stats:      ${OUTDIR}/final/${CASE_LABEL}_meta_summary_stats.tsv.gz"
 log_info "Plots:              ${OUTDIR}/final/plots/"
 log_info "Logs:               ${OUTDIR}/logs/"
 log_info "Finished:           $(date)"
 log_separator
 
-# List final outputs
 log_substep "Final outputs"
-find "${OUTDIR}/final" -type f | sort | while read -r f; do
-    log_info "  $(du -h "$f" | cut -f1)  ${f}"
-done
+if [[ -d "${OUTDIR}/final" ]]; then
+    find "${OUTDIR}/final" -type f | sort | while read -r f; do
+        log_info "  $(du -h "$f" | cut -f1)  ${f}"
+    done
+fi
 
 log_separator
 log_info "All done."
