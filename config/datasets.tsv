@@ -1,0 +1,14 @@
+# Dataset configuration for glioma GWAS meta-analysis pipeline
+# Tab-separated. Lines starting with # are ignored.
+#
+# Columns:
+#   dataset        Unique dataset label (used in output naming)
+#   vcf_dir        Directory containing chr{1..22}.dose.vcf.gz files
+#   covariate_file Path to the covariate CSV file for this dataset
+#
+# Example:
+dataset	vcf_dir	covariate_file
+cidr	/data/imputed/cidr	/data/covariates/cidr-covariates.csv
+onco	/data/imputed/onco	/data/covariates/onco-covariates.csv
+i370	/data/imputed/i370	/data/covariates/i370-covariates.csv
+tcga	/data/imputed/tcga	/data/covariates/tcga-covariates.csv
