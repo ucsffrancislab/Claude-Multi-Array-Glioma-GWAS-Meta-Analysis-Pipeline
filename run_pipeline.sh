@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=120G
+#SBATCH --time=14-0
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 # =============================================================================
 # run_pipeline.sh — Glioma GWAS meta-analysis pipeline
 #
 # Usage:
-#   sbatch --job-name=idhmt_intact --ntasks=1 --cpus-per-task=16 \
-#          --mem=120G run_pipeline.sh \
+#   sbatch --job-name=idhmt_intact \
+#          run_pipeline.sh \
+#          --pipeline-dir /path/to/gwas_meta_pipeline \
 #          --outdir results/idhmt_intact \
 #          --idh-subtype mt --pq-subtype intact \
 #          --datasets-config config/datasets.tsv
