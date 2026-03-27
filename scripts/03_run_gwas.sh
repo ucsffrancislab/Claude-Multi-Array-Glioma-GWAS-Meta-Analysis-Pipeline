@@ -100,6 +100,7 @@ run_one_gwas() {
     plink2 \
         --vcf "${vcf}" dosage=DS \
         --double-id \
+        --no-input-missing-phenotype \
         --keep "${keep_file}" \
         --pheno "${pheno_file}" \
         --pheno-name pheno \
