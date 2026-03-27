@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
+#SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=120G
 #SBATCH --time=14-0
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
+#SBATCH --mail-type=FAIL
+#SBATCH --export=None
 # =============================================================================
 # run_pipeline.sh — Glioma GWAS meta-analysis pipeline
 #
