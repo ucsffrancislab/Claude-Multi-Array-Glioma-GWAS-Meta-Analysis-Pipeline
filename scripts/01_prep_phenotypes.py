@@ -29,33 +29,10 @@ from utils.logging_utils import (
     setup_logging, log_info, log_warn, log_error,
     log_step, log_substep, log_separator, log_table, log_timer_start, log_timer_end,
 )
+from utils.params import load_params
 
 import pandas as pd
 import numpy as np
-
-
-def load_params(params_file: str) -> dict:
-    """Load pipeline parameters from the TSV params file."""
-    params: dict = {"ds_names": [], "ds_vcf_dirs": {}, "ds_covars": {}}
-    with open(params_file) as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith("key") or not line:
-                continue
-            parts = line.split("\t", 1)
-            key = parts[0]
-            val = parts[1] if len(parts) > 1 else ""
-            if key == "ds_name":
-                params["ds_names"].append(val)
-            elif key.startswith("ds_vcf_dir_"):
-                ds = key.replace("ds_vcf_dir_", "")
-                params["ds_vcf_dirs"][ds] = val
-            elif key.startswith("ds_covar_"):
-                ds = key.replace("ds_covar_", "")
-                params["ds_covars"][ds] = val
-            else:
-                params[key] = val
-    return params
 
 
 def define_cases(df: pd.DataFrame, idh_subtype: str, pq_subtype: str) -> pd.DataFrame:
@@ -204,8 +181,12 @@ def main():
         source_adj_rows.append({"dataset": ds, "adjust_source": adjust_source})
 
         # Encode sex: F=0, M=1
-        sex_map = {"F": 0, "f": 0, "M": 1, "m": 1, 0: 0, 1: 1, 2: 0}
-        df["sex_coded"] = df["sex"].map(sex_map)
+        # Force to string first so numeric codes (1/2) and NaN-induced
+        # float codes (1.0/2.0) all map correctly.
+        df["sex_str"] = df["sex"].astype(str).str.strip().str.upper()
+        sex_map = {"F": 0, "M": 1, "0": 0, "1": 1, "2": 0}
+        df["sex_coded"] = df["sex_str"].map(sex_map)
+        df = df.drop(columns=["sex_str"])
 
         # Validate age (ensure numeric)
         if "age" in df.columns:

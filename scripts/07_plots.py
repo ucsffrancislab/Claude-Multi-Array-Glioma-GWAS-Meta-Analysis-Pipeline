@@ -25,6 +25,7 @@ from utils.logging_utils import (
     log_step, log_substep, log_separator,
     log_timer_start, log_timer_end,
 )
+from utils.params import load_params
 
 import numpy as np
 import pandas as pd
@@ -39,23 +40,6 @@ try:
     HAS_MPL = True
 except ImportError:
     HAS_MPL = False
-
-
-def load_params(params_file: str) -> dict:
-    params: dict = {"ds_names": []}
-    with open(params_file) as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith("key") or not line:
-                continue
-            parts = line.split("\t", 1)
-            key = parts[0]
-            val = parts[1] if len(parts) > 1 else ""
-            if key == "ds_name":
-                params["ds_names"].append(val)
-            else:
-                params[key] = val
-    return params
 
 
 def calculate_lambda_gc(pvalues: np.ndarray) -> float:
@@ -125,8 +109,7 @@ def plot_manhattan(df: pd.DataFrame, case_label: str, outdir: str):
     ax.legend(loc="upper right", fontsize=10)
     ax.set_xlim(plot_df["POS_CUM"].min() - 1e7, plot_df["POS_CUM"].max() + 1e7)
 
-    # Cap y-axis for readability but show extreme values
-    y_max = min(plot_df["LOG10P"].max() + 2, 50)
+    y_max = plot_df["LOG10P"].max() + 2
     ax.set_ylim(0, y_max)
 
     plt.tight_layout()

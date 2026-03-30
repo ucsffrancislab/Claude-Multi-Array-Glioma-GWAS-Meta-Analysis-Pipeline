@@ -78,16 +78,17 @@ filter_one_vcf() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO]  Input: ${vcf} ($(du -h "${vcf}" | cut -f1))" >> "${log_file}"
 
     # Detect R² field name from VCF header
+    # Search all ##INFO lines (not just last 50 lines of header)
     local r2_field=""
-    local header_line
-    header_line=$(bcftools view -h "${vcf}" 2>>"${log_file}" | tail -50)
+    local info_lines
+    info_lines=$(bcftools view -h "${vcf}" 2>>"${log_file}" | grep '^##INFO')
 
-    if echo "${header_line}" | grep -q 'ID=R2,'; then
+    if echo "${info_lines}" | grep -q 'ID=R2,'; then
         r2_field="R2"
-    elif echo "${header_line}" | grep -q 'ID=INFO,Number=1'; then
-        r2_field="INFO"
-    elif echo "${header_line}" | grep -q 'ID=DR2,'; then
+    elif echo "${info_lines}" | grep -q 'ID=DR2,'; then
         r2_field="DR2"
+    elif echo "${info_lines}" | grep -q 'ID=INFO,Number=1,Type=Float'; then
+        r2_field="INFO"
     fi
 
     if [[ -z "${r2_field}" ]]; then

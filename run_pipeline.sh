@@ -405,7 +405,7 @@ STEP_EXIT=$?
 set -e
 
 if [[ ${STEP_EXIT} -ne 0 ]]; then
-    log_error "Step 4 failed (exit=${STEP_EXIT})"
+    die "Step 4 failed (exit=${STEP_EXIT}). Cannot run meta-analysis without merged results."
 fi
 log_timer_end "Step 4: Merge per-chromosome GWAS results"
 
@@ -424,7 +424,7 @@ STEP_EXIT=$?
 set -e
 
 if [[ ${STEP_EXIT} -ne 0 ]]; then
-    log_error "Step 5 failed (exit=${STEP_EXIT})"
+    die "Step 5 failed (exit=${STEP_EXIT}). Meta-analysis did not complete."
 fi
 log_timer_end "Step 5: Meta-analysis"
 
@@ -443,7 +443,7 @@ STEP_EXIT=$?
 set -e
 
 if [[ ${STEP_EXIT} -ne 0 ]]; then
-    log_error "Step 6 failed (exit=${STEP_EXIT})"
+    die "Step 6 failed (exit=${STEP_EXIT}). Post-meta QC did not complete — no summary stats produced."
 fi
 log_timer_end "Step 6: Post-meta QC"
 

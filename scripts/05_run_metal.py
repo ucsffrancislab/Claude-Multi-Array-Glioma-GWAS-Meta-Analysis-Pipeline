@@ -25,23 +25,7 @@ from utils.logging_utils import (
     log_step, log_substep, log_separator,
     log_timer_start, log_timer_end,
 )
-
-
-def load_params(params_file: str) -> dict:
-    params: dict = {"ds_names": []}
-    with open(params_file) as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith("key") or not line:
-                continue
-            parts = line.split("\t", 1)
-            key = parts[0]
-            val = parts[1] if len(parts) > 1 else ""
-            if key == "ds_name":
-                params["ds_names"].append(val)
-            else:
-                params[key] = val
-    return params
+from utils.params import load_params
 
 
 def main():

@@ -8,9 +8,10 @@ Steps:
   3. Filter by minimum number of contributing datasets
   4. Add OR and 95% CI
   5. Flag high-heterogeneity variants
-  6. Write final formatted summary statistics
-  7. Write genome-wide significant hits table
-  8. Write per-dataset lambda summary
+  6. Compute per-variant case/control counts from per-dataset OBS_CT
+  7. Write final formatted summary statistics
+  8. Write genome-wide significant hits table
+  9. Write per-dataset lambda summary (with lambda_1000)
 """
 
 import argparse
@@ -23,27 +24,11 @@ from utils.logging_utils import (
     log_step, log_substep, log_separator, log_table,
     log_timer_start, log_timer_end,
 )
+from utils.params import load_params
 
 import numpy as np
 import pandas as pd
 from scipy.stats import chi2
-
-
-def load_params(params_file: str) -> dict:
-    params: dict = {"ds_names": []}
-    with open(params_file) as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith("key") or not line:
-                continue
-            parts = line.split("\t", 1)
-            key = parts[0]
-            val = parts[1] if len(parts) > 1 else ""
-            if key == "ds_name":
-                params["ds_names"].append(val)
-            else:
-                params[key] = val
-    return params
 
 
 def calculate_lambda_gc(pvalues: np.ndarray) -> float:
@@ -55,16 +40,15 @@ def calculate_lambda_gc(pvalues: np.ndarray) -> float:
     return float(np.median(chi2_vals) / chi2.ppf(0.5, df=1))
 
 
-def calculate_lambda_1000(pvalues: np.ndarray, n_cases: int, n_controls: int) -> float:
+def calculate_lambda_1000(lambda_gc: float, n_cases: int, n_controls: int) -> float:
     """
     Calculate lambda_1000: lambda scaled to an effective sample size of 1000.
-    Useful for comparing across studies of different sizes.
-    lambda_1000 = 1 + (lambda - 1) * (1/n_cases + 1/n_controls) / (1/1000 + 1/1000)
+    Useful for comparing inflation across studies of different sizes.
+    lambda_1000 = 1 + (lambda - 1) * (1/n_cases + 1/n_controls) / (1/500 + 1/500)
     """
-    lam = calculate_lambda_gc(pvalues)
-    if np.isnan(lam) or n_cases == 0 or n_controls == 0:
+    if np.isnan(lambda_gc) or n_cases == 0 or n_controls == 0:
         return float("nan")
-    return 1 + (lam - 1) * (1 / n_cases + 1 / n_controls) / (1 / 500 + 1 / 500)
+    return 1 + (lambda_gc - 1) * (1 / n_cases + 1 / n_controls) / (1 / 500 + 1 / 500)
 
 
 def main():
@@ -95,9 +79,6 @@ def main():
     log_info(f"Raw METAL variants: {len(df)}")
 
     # Standardize column names (METAL uses specific names)
-    # Expected: MarkerName, Allele1, Allele2, Effect, StdErr, P-value,
-    #           Direction, HetISq, HetChiSq, HetDf, HetPVal,
-    #           Freq1, FreqSE, MinFreq, MaxFreq, Weight
     col_map = {}
     for c in df.columns:
         cl = c.lower().replace("-", "").replace("_", "")
@@ -185,17 +166,22 @@ def main():
 
     # ---------------------------------------------------------
     # Per-variant case and control counts
-    # For each variant, determine which datasets contributed
-    # (from METAL's Direction string: +/- = contributed, ? = absent)
-    # and sum the case/control counts from the phenotype files.
+    #
+    # Use per-variant OBS_CT from each dataset's merged results
+    # (the actual observation count PLINK2 reported per variant)
+    # combined with each dataset's case/control ratio to estimate
+    # per-variant N_CASES and N_CONTROLS.
+    #
+    # This is more accurate than using dataset-level totals
+    # because OBS_CT accounts for per-variant missingness.
     # ---------------------------------------------------------
     log_substep("Computing per-variant case/control counts")
-    pheno_dir = os.path.join(os.path.dirname(args.metal_dir.rstrip("/")), "phenotypes")
+    base_dir = os.path.dirname(args.metal_dir.rstrip("/"))
+    pheno_dir = os.path.join(base_dir, "phenotypes")
+    gwas_dir = os.path.join(base_dir, "gwas")
 
-    # Determine dataset order (same order as Direction string = same as METAL input order)
+    # Determine dataset order (same order as Direction string = METAL input order)
     ds_names = params["ds_names"]
-    # Only include datasets that had merged results (same order as METAL processed them)
-    gwas_dir = os.path.join(os.path.dirname(args.metal_dir.rstrip("/")), "gwas")
     active_ds = []
     for ds in ds_names:
         merged_file = os.path.join(gwas_dir, f"{ds}_merged.tsv")
@@ -207,36 +193,83 @@ def main():
     # Load per-dataset case/control totals from phenotype files
     ds_case_counts = {}
     ds_ctrl_counts = {}
+    ds_ratios = {}
     for ds in active_ds:
         pheno_file = os.path.join(pheno_dir, f"{ds}.pheno")
         if os.path.exists(pheno_file):
             pheno_df = pd.read_csv(pheno_file, sep="\t", usecols=["pheno"])
-            n_cases = (pheno_df["pheno"] == 2).sum()
-            n_ctrls = (pheno_df["pheno"] == 1).sum()
-            ds_case_counts[ds] = int(n_cases)
-            ds_ctrl_counts[ds] = int(n_ctrls)
-            log_info(f"  {ds}: {n_cases} cases, {n_ctrls} controls")
+            n_cases = int((pheno_df["pheno"] == 2).sum())
+            n_ctrls = int((pheno_df["pheno"] == 1).sum())
+            ds_case_counts[ds] = n_cases
+            ds_ctrl_counts[ds] = n_ctrls
+            total = n_cases + n_ctrls
+            ds_ratios[ds] = n_cases / total if total > 0 else 0.5
+            log_info(f"  {ds}: {n_cases} cases, {n_ctrls} controls (ratio={ds_ratios[ds]:.3f})")
         else:
             log_warn(f"  {ds}: phenotype file not found")
 
+    # Load per-dataset OBS_CT (N column) from merged GWAS results
+    ds_obs_ct = {}
+    for ds in active_ds:
+        merged_file = os.path.join(gwas_dir, f"{ds}_merged.tsv")
+        if os.path.exists(merged_file):
+            try:
+                cols_to_load = ["SNP", "N"] if "N" in pd.read_csv(merged_file, sep="\t", nrows=0).columns else ["SNP"]
+                ds_df = pd.read_csv(merged_file, sep="\t", usecols=cols_to_load)
+                if "N" in ds_df.columns:
+                    ds_obs_ct[ds] = ds_df.set_index("SNP")["N"]
+                    log_info(f"  {ds}: loaded per-variant OBS_CT ({len(ds_df)} variants)")
+                else:
+                    log_warn(f"  {ds}: no N column in merged results — will use dataset totals")
+            except Exception as e:
+                log_warn(f"  {ds}: error loading merged results: {e}")
+
     if ds_case_counts and "DIRECTION" in final.columns:
-        # For each variant, sum cases and controls from contributing datasets
+        # For each variant, estimate N_CASES and N_CONTROLS from per-variant OBS_CT
+        # and each dataset's case/control ratio.
+        # Fall back to dataset-level totals if per-variant OBS_CT is unavailable.
         directions = final["DIRECTION"].values
+        snp_values = final["SNP"].values
         n_cases_arr = np.zeros(len(final), dtype=int)
         n_ctrls_arr = np.zeros(len(final), dtype=int)
 
-        for var_idx in range(len(final)):
-            direction = str(directions[var_idx])
-            for ds_idx, ds in enumerate(active_ds):
-                if ds_idx >= len(direction):
-                    break
-                if direction[ds_idx] in ("+", "-"):
-                    n_cases_arr[var_idx] += ds_case_counts.get(ds, 0)
-                    n_ctrls_arr[var_idx] += ds_ctrl_counts.get(ds, 0)
+        for ds_idx, ds in enumerate(active_ds):
+            ratio = ds_ratios.get(ds, 0.5)
+            has_obs_ct = ds in ds_obs_ct
+
+            # Build boolean mask: this dataset contributed to each variant
+            contrib_mask = np.array([
+                ds_idx < len(str(d)) and str(d)[ds_idx] in ("+", "-")
+                for d in directions
+            ])
+
+            if has_obs_ct:
+                # Look up per-variant OBS_CT
+                obs_series = ds_obs_ct[ds]
+                obs_values = pd.Series(snp_values).map(obs_series).values
+
+                # Where we have per-variant OBS_CT, use it with the ratio
+                has_obs = contrib_mask & np.isfinite(obs_values.astype(float))
+                obs_int = np.nan_to_num(obs_values, nan=0).astype(int)
+
+                est_cases = np.round(obs_int * ratio).astype(int)
+                est_ctrls = obs_int - est_cases
+
+                n_cases_arr += np.where(has_obs, est_cases, 0)
+                n_ctrls_arr += np.where(has_obs, est_ctrls, 0)
+
+                # Fall back to dataset totals for variants not found in merged results
+                fallback = contrib_mask & ~has_obs
+                n_cases_arr += np.where(fallback, ds_case_counts.get(ds, 0), 0)
+                n_ctrls_arr += np.where(fallback, ds_ctrl_counts.get(ds, 0), 0)
+            else:
+                # No per-variant OBS_CT — use dataset totals
+                n_cases_arr += np.where(contrib_mask, ds_case_counts.get(ds, 0), 0)
+                n_ctrls_arr += np.where(contrib_mask, ds_ctrl_counts.get(ds, 0), 0)
 
         final["N_CASES"] = n_cases_arr
         final["N_CONTROLS"] = n_ctrls_arr
-        log_info(f"  Added N_CASES and N_CONTROLS columns")
+        log_info(f"  Added N_CASES and N_CONTROLS columns (from per-variant OBS_CT where available)")
         log_info(f"  Range: N_CASES={n_cases_arr.min()}-{n_cases_arr.max()}, "
                  f"N_CONTROLS={n_ctrls_arr.min()}-{n_ctrls_arr.max()}")
     else:
@@ -285,18 +318,30 @@ def main():
     log_info(f"Suggestive (1e-5 > P ≥ 5e-8): {len(suggestive)}")
 
     # Heterogeneity summary
+    n_high_het = "NA"
     if "HET_ISQ" in final.columns:
         het_high = final[final["HET_ISQ"].astype(float) > 75]
-        log_info(f"High heterogeneity (I² > 75%): {len(het_high)}")
+        n_high_het = len(het_high)
+        log_info(f"High heterogeneity (I² > 75%): {n_high_het}")
+
+    # Compute total case/control counts for meta-level lambda_1000
+    total_cases = sum(ds_case_counts.values())
+    total_controls = sum(ds_ctrl_counts.values())
+    lambda_1000_meta = calculate_lambda_1000(lambda_gc, total_cases, total_controls)
+    log_info(f"Lambda_1000 (meta): {lambda_1000_meta:.4f}  "
+             f"(based on {total_cases} cases, {total_controls} controls)")
 
     # Write analysis summary
     summary = {
         "case_definition": case_label,
         "n_variants": len(final),
         "lambda_gc": f"{lambda_gc:.4f}",
+        "lambda_1000": f"{lambda_1000_meta:.4f}",
+        "n_cases_total": total_cases,
+        "n_controls_total": total_controls,
         "n_gw_significant": n_gw,
         "n_suggestive": len(suggestive),
-        "n_high_het": len(het_high) if "HET_ISQ" in final.columns else "NA",
+        "n_high_het": n_high_het,
         "min_datasets_required": min_datasets,
     }
 
@@ -306,8 +351,6 @@ def main():
 
     # Per-dataset lambda (from individual merged files)
     log_substep("Per-dataset lambda GC")
-    gwas_dir = os.path.dirname(args.metal_dir.rstrip("/"))
-    gwas_dir = os.path.join(gwas_dir, "gwas")
     ds_lambda_rows = []
 
     for ds in params["ds_names"]:
@@ -315,8 +358,18 @@ def main():
         if os.path.exists(merged_file):
             ds_df = pd.read_csv(merged_file, sep="\t", usecols=["P"])
             ds_lambda = calculate_lambda_gc(ds_df["P"].values)
-            ds_lambda_rows.append({"dataset": ds, "lambda_gc": f"{ds_lambda:.4f}"})
-            log_info(f"  {ds}: lambda = {ds_lambda:.4f}")
+            ds_n_cases = ds_case_counts.get(ds, 0)
+            ds_n_ctrls = ds_ctrl_counts.get(ds, 0)
+            ds_lam1000 = calculate_lambda_1000(ds_lambda, ds_n_cases, ds_n_ctrls)
+            ds_lambda_rows.append({
+                "dataset": ds,
+                "lambda_gc": f"{ds_lambda:.4f}",
+                "lambda_1000": f"{ds_lam1000:.4f}",
+                "n_cases": ds_n_cases,
+                "n_controls": ds_n_ctrls,
+            })
+            log_info(f"  {ds}: lambda={ds_lambda:.4f}  lambda_1000={ds_lam1000:.4f}  "
+                     f"({ds_n_cases} cases, {ds_n_ctrls} controls)")
 
     if ds_lambda_rows:
         ds_lambda_df = pd.DataFrame(ds_lambda_rows)
