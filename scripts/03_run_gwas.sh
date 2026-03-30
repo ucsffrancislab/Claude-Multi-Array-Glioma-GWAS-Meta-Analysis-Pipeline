@@ -110,6 +110,7 @@ run_one_gwas() {
         --glm firth-fallback hide-covar cols=chrom,pos,ref,alt,ax,a1freq,nobs,orbeta,se,ci,tz,p \
         --ci 0.95 \
         --vif 100 \
+        --mac 20 \
         --chr "${chr}" \
         --out "${out_prefix}" \
         --threads "${PLINK_THREADS}" \

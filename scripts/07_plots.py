@@ -303,6 +303,227 @@ def write_sample_summary_table(pheno_dir: str, case_label: str, outdir: str):
     log_info(f"  Sample table: {out_path}")
 
 
+
+# =========================================================================
+# Variant filtering funnel table
+# =========================================================================
+def write_filtering_funnel(meta_df: pd.DataFrame, case_label: str, outdir: str,
+                           params: dict, gwas_dir: str):
+    """Write variant count at each pipeline stage."""
+    log_substep("Variant filtering funnel")
+    import glob
+
+    rows = []
+
+    # Per-dataset: count variants in merged files
+    for ds in params["ds_names"]:
+        merged = os.path.join(gwas_dir, f"{ds}_merged.tsv")
+        if os.path.exists(merged):
+            n = sum(1 for _ in open(merged)) - 1
+            rows.append({"stage": f"GWAS_{ds}", "n_variants": n})
+
+    # Meta-analysis total
+    rows.append({"stage": "meta_all", "n_variants": len(meta_df)})
+
+    # Variants in ≥2 datasets
+    min_ds = int(params.get("min_datasets", 2))
+    if "N_STUDIES" in meta_df.columns:
+        n_multi = (meta_df["N_STUDIES"] >= min_ds).sum()
+        rows.append({"stage": f"meta_in_{min_ds}+_datasets", "n_variants": n_multi})
+
+    # Suggestive
+    n_sugg = (meta_df["P"].astype(float) < 1e-5).sum()
+    rows.append({"stage": "suggestive_P<1e-5", "n_variants": n_sugg})
+
+    # GW significant
+    n_gw = (meta_df["P"].astype(float) < 5e-8).sum()
+    rows.append({"stage": "gw_significant_P<5e-8", "n_variants": n_gw})
+
+    funnel_df = pd.DataFrame(rows)
+    out_path = os.path.join(outdir, f"{case_label}_filtering_funnel.tsv")
+    funnel_df.to_csv(out_path, sep="\t", index=False)
+    log_info(f"  Filtering funnel: {out_path}")
+
+    for _, r in funnel_df.iterrows():
+        log_info(f"  {r['stage']:35s}  {r['n_variants']:>12,}")
+
+
+# =========================================================================
+# MAF vs effect size plot
+# =========================================================================
+def plot_maf_vs_effect(df: pd.DataFrame, case_label: str, outdir: str):
+    """Funnel plot of MAF vs absolute BETA."""
+    log_substep("MAF vs effect size plot")
+
+    if "A1_FREQ" not in df.columns:
+        log_warn("  No A1_FREQ column — skipping MAF vs effect plot")
+        return
+
+    plot_df = df[["A1_FREQ", "BETA", "P"]].dropna().copy()
+    plot_df["MAF"] = plot_df["A1_FREQ"].clip(0, 1)
+    plot_df.loc[plot_df["MAF"] > 0.5, "MAF"] = 1 - plot_df.loc[plot_df["MAF"] > 0.5, "MAF"]
+    plot_df["ABS_BETA"] = plot_df["BETA"].abs()
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    # Color by significance
+    is_sig = plot_df["P"].astype(float) < 5e-8
+    is_sugg = (plot_df["P"].astype(float) >= 5e-8) & (plot_df["P"].astype(float) < 1e-5)
+    is_ns = ~is_sig & ~is_sugg
+
+    ax.scatter(plot_df.loc[is_ns, "MAF"], plot_df.loc[is_ns, "ABS_BETA"],
+               s=1, c="#cccccc", alpha=0.3, rasterized=True, label="NS")
+    ax.scatter(plot_df.loc[is_sugg, "MAF"], plot_df.loc[is_sugg, "ABS_BETA"],
+               s=4, c="#ff7f0e", alpha=0.5, rasterized=True, label="Suggestive")
+    ax.scatter(plot_df.loc[is_sig, "MAF"], plot_df.loc[is_sig, "ABS_BETA"],
+               s=15, c="#d62728", alpha=0.7, zorder=5, label="GW sig")
+
+    ax.set_xlabel("Minor Allele Frequency", fontsize=12)
+    ax.set_ylabel("|BETA| (absolute log OR)", fontsize=12)
+    ax.set_title(f"MAF vs Effect Size — {case_label}", fontsize=13, fontweight="bold")
+    ax.legend(loc="upper right", fontsize=9)
+    ax.set_xlim(0, 0.5)
+
+    plt.tight_layout()
+    out_path = os.path.join(outdir, f"{case_label}_maf_vs_effect.png")
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.savefig(out_path.replace(".png", ".pdf"), bbox_inches="tight")
+    plt.close()
+    log_info(f"  MAF vs effect: {out_path}")
+
+
+# =========================================================================
+# Heterogeneity distribution
+# =========================================================================
+def plot_heterogeneity(df: pd.DataFrame, case_label: str, outdir: str):
+    """Histogram of I² values across all variants."""
+    log_substep("Heterogeneity distribution")
+
+    if "HET_ISQ" not in df.columns:
+        log_warn("  No HET_ISQ column — skipping heterogeneity plot")
+        return
+
+    isq = df["HET_ISQ"].dropna().values.astype(float)
+    isq = isq[np.isfinite(isq)]
+
+    if len(isq) == 0:
+        log_warn("  No valid I² values")
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.hist(isq, bins=50, color="#1f77b4", alpha=0.7, edgecolor="white")
+    ax.axvline(25, color="#ff7f0e", linestyle="--", linewidth=1, label="I²=25%")
+    ax.axvline(50, color="#d62728", linestyle="--", linewidth=1, label="I²=50%")
+    ax.axvline(75, color="#7b2d8e", linestyle="--", linewidth=1, label="I²=75%")
+
+    ax.set_xlabel("I² (%)", fontsize=12)
+    ax.set_ylabel("Number of variants", fontsize=12)
+    ax.set_title(f"Heterogeneity Distribution — {case_label}", fontsize=13,
+                 fontweight="bold")
+    ax.legend(loc="upper right", fontsize=9)
+
+    plt.tight_layout()
+    out_path = os.path.join(outdir, f"{case_label}_heterogeneity_dist.png")
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.savefig(out_path.replace(".png", ".pdf"), bbox_inches="tight")
+    plt.close()
+    log_info(f"  Heterogeneity distribution: {out_path}")
+
+
+# =========================================================================
+# Per-dataset standalone QQ plots
+# =========================================================================
+def plot_per_dataset_qq(per_dataset_pvals: dict, case_label: str, outdir: str):
+    """Individual QQ plot for each dataset."""
+    log_substep("Per-dataset standalone QQ plots")
+
+    for ds_name, ds_pvals in per_dataset_pvals.items():
+        ds_pv = ds_pvals[np.isfinite(ds_pvals) & (ds_pvals > 0) & (ds_pvals <= 1)]
+        ds_pv = np.sort(ds_pv)
+
+        if len(ds_pv) == 0:
+            continue
+
+        observed = -np.log10(ds_pv)
+        expected = -np.log10(np.arange(1, len(ds_pv) + 1) / (len(ds_pv) + 1))
+        lambda_gc = calculate_lambda_gc(ds_pv)
+
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.scatter(expected, observed, s=3, alpha=0.5, c="#1f77b4", rasterized=True)
+
+        max_val = max(expected.max(), observed.max()) + 0.5
+        ax.plot([0, max_val], [0, max_val], "r--", linewidth=1)
+
+        ax.set_xlabel("Expected -log₁₀(P)", fontsize=11)
+        ax.set_ylabel("Observed -log₁₀(P)", fontsize=11)
+        ax.set_title(f"QQ Plot — {ds_name}\nλ_GC = {lambda_gc:.4f}", fontsize=12,
+                     fontweight="bold")
+        ax.set_xlim(0, max_val)
+        ax.set_ylim(0, max_val)
+        ax.set_aspect("equal")
+
+        plt.tight_layout()
+        out_path = os.path.join(outdir, f"{case_label}_qq_{ds_name}.png")
+        plt.savefig(out_path, dpi=200, bbox_inches="tight")
+        plt.savefig(out_path.replace(".png", ".pdf"), bbox_inches="tight")
+        plt.close()
+        log_info(f"  QQ {ds_name}: {out_path}")
+
+
+# =========================================================================
+# Per-dataset concordance table for significant hits
+# =========================================================================
+def write_concordance_table(meta_df: pd.DataFrame, per_dataset_dfs: dict,
+                            case_label: str, outdir: str, p_threshold: float = 5e-8):
+    """Per-dataset effect sizes and P-values for significant meta hits."""
+    log_substep("Per-dataset concordance table")
+
+    sig = meta_df[meta_df["P"].astype(float) < p_threshold].copy()
+    if len(sig) == 0:
+        # Fall back to top 20
+        sig = meta_df.nsmallest(20, "P").copy()
+
+    rows = []
+    for _, hit in sig.iterrows():
+        snp = hit["SNP"]
+        meta_a1 = str(hit.get("A1", "")).upper()
+        row = {
+            "SNP": snp,
+            "CHR": hit["CHR"],
+            "BP": hit["BP"],
+            "meta_A1": meta_a1,
+            "meta_BETA": hit["BETA"],
+            "meta_P": hit["P"],
+            "meta_OR": hit.get("OR", np.nan),
+        }
+
+        for ds, ds_df in per_dataset_dfs.items():
+            ds_match = ds_df[ds_df["SNP"] == snp]
+            if len(ds_match) > 0:
+                ds_row = ds_match.iloc[0]
+                ds_beta = float(ds_row["BETA"])
+                ds_a1 = str(ds_row.get("A1", "")).upper()
+
+                # Align alleles
+                if meta_a1 and ds_a1 and ds_a1 != meta_a1:
+                    ds_beta = -ds_beta
+
+                row[f"{ds}_BETA"] = ds_beta
+                row[f"{ds}_SE"] = float(ds_row["SE"])
+                row[f"{ds}_P"] = float(ds_row["P"])
+            else:
+                row[f"{ds}_BETA"] = np.nan
+                row[f"{ds}_SE"] = np.nan
+                row[f"{ds}_P"] = np.nan
+
+        rows.append(row)
+
+    conc_df = pd.DataFrame(rows)
+    out_path = os.path.join(outdir, f"{case_label}_concordance.tsv")
+    conc_df.to_csv(out_path, sep="\t", index=False, float_format="%.4g")
+    log_info(f"  Concordance table: {out_path} ({len(conc_df)} variants)")
+
+
 # =========================================================================
 # Main
 # =========================================================================
@@ -370,6 +591,22 @@ def main():
 
     pheno_dir = os.path.join(os.path.dirname(args.final_dir), "phenotypes")
     write_sample_summary_table(pheno_dir, case_label, args.outdir)
+
+    # Filtering funnel
+    write_filtering_funnel(meta_df, case_label, args.outdir, params, args.gwas_dir)
+
+    # Per-dataset concordance table
+    write_concordance_table(meta_df, per_dataset_dfs, case_label, args.outdir)
+
+    if HAS_MPL:
+        # MAF vs effect size
+        plot_maf_vs_effect(meta_df, case_label, args.outdir)
+
+        # Heterogeneity distribution
+        plot_heterogeneity(meta_df, case_label, args.outdir)
+
+        # Per-dataset standalone QQ
+        plot_per_dataset_qq(per_dataset_pvals, case_label, args.outdir)
 
     # List all outputs
     log_separator()

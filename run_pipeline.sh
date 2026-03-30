@@ -469,6 +469,52 @@ fi
 log_timer_end "Step 7: Plots and tables"
 
 # =============================================================================
+# STEP 8: Clump and annotate significant loci
+# =============================================================================
+log_timer_start "Step 8: Clumping and annotation"
+log_step "Step 8: Clumping significant loci and gene annotation"
+
+set +e
+python3 "${PIPELINE_DIR}/scripts/08_clump_annotate.py" \
+    --params "${PARAMS_FILE}" \
+    --final-dir "${OUTDIR}/final" \
+    --outdir "${OUTDIR}/final/plots"
+STEP_EXIT=$?
+set -e
+
+if [[ ${STEP_EXIT} -ne 0 ]]; then
+    log_error "Step 8 failed (exit=${STEP_EXIT})"
+fi
+
+log_timer_end "Step 8: Clumping and annotation"
+
+# =============================================================================
+# STEP 9: Known glioma loci replication check
+# =============================================================================
+log_timer_start "Step 9: Known loci replication"
+log_step "Step 9: Known glioma loci replication check"
+
+KNOWN_LOCI_FILE="${PIPELINE_DIR}/config/known_glioma_loci.tsv"
+if [[ -f "${KNOWN_LOCI_FILE}" ]]; then
+    set +e
+    python3 "${PIPELINE_DIR}/scripts/09_known_loci.py" \
+        --params "${PARAMS_FILE}" \
+        --final-dir "${OUTDIR}/final" \
+        --known-loci "${KNOWN_LOCI_FILE}" \
+        --outdir "${OUTDIR}/final/plots"
+    STEP_EXIT=$?
+    set -e
+
+    if [[ ${STEP_EXIT} -ne 0 ]]; then
+        log_error "Step 9 failed (exit=${STEP_EXIT})"
+    fi
+else
+    log_warn "Known loci reference not found: ${KNOWN_LOCI_FILE} — skipping"
+fi
+
+log_timer_end "Step 9: Known loci replication"
+
+# =============================================================================
 # Done
 # =============================================================================
 log_separator
