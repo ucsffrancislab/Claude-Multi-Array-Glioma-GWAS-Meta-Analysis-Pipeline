@@ -221,6 +221,7 @@ def plot_forest(meta_df: pd.DataFrame, per_dataset_dfs: dict,
         meta_beta = float(hit["BETA"])
         meta_se = float(hit["SE"])
         meta_p = float(hit["P"])
+        meta_a1 = str(hit.get("A1", "")).upper()
 
         # Meta-analysis estimate
         ax.errorbar(
@@ -243,6 +244,12 @@ def plot_forest(meta_df: pd.DataFrame, per_dataset_dfs: dict,
             ds_row = ds_row.iloc[0]
             ds_beta = float(ds_row["BETA"])
             ds_se = float(ds_row["SE"])
+            ds_a1 = str(ds_row.get("A1", "")).upper()
+
+            # Align to meta-analysis effect allele
+            # If the per-dataset A1 differs from meta A1, flip the sign
+            if meta_a1 and ds_a1 and ds_a1 != meta_a1:
+                ds_beta = -ds_beta
 
             ax.errorbar(
                 ds_beta, y_pos,
