@@ -54,6 +54,8 @@ def main():
     parser.add_argument("--known-loci", required=True,
                         help="Path to known_glioma_loci.tsv reference file")
     parser.add_argument("--outdir", required=True)
+    parser.add_argument("--genome-build", default="hg19", choices=["hg19", "hg38"],
+                        help="Genome build of summary stats (default: hg19)")
     parser.add_argument("--window", type=int, default=LOOKUP_WINDOW)
     args = parser.parse_args()
 
@@ -72,6 +74,18 @@ def main():
 
     known = pd.read_csv(args.known_loci, sep="\t", comment="#")
     log_info(f"Known loci: {len(known)} lead SNPs")
+    log_info(f"Genome build: {args.genome_build}")
+
+    # Select the appropriate position column
+    bp_col = f"bp_{args.genome_build}"
+    if bp_col not in known.columns:
+        # Fall back to generic column name
+        bp_col = "bp_hg19" if args.genome_build == "hg19" else "bp_hg38"
+        if bp_col not in known.columns:
+            log_error(f"Position column '{bp_col}' not found in known loci file. "
+                      f"Available columns: {list(known.columns)}")
+            sys.exit(1)
+    log_info(f"Using position column: {bp_col}")
 
     # Load summary stats
     meta_file = os.path.join(args.final_dir, f"{case_label}_meta_summary_stats.tsv")
@@ -89,7 +103,7 @@ def main():
     results = []
 
     for _, locus in known.iterrows():
-        hit = lookup_locus(df, str(locus["chr"]), int(locus["bp_hg19"]),
+        hit = lookup_locus(df, str(locus["chr"]), int(locus[bp_col]),
                            window=args.window)
 
         row = {
@@ -97,7 +111,9 @@ def main():
             "known_rsid": locus["rsid"],
             "known_gene": locus["gene"],
             "known_chr": locus["chr"],
-            "known_bp": locus["bp_hg19"],
+            "known_bp_hg19": locus.get("bp_hg19", ""),
+            "known_bp_hg38": locus.get("bp_hg38", ""),
+            "lookup_bp": locus[bp_col],
             "reported_or": locus["reported_or"],
             "reported_subtype": locus["subtype"],
             "source": locus["source"],
@@ -107,7 +123,7 @@ def main():
             row.update({
                 "our_best_SNP": hit["SNP"],
                 "our_bp": int(hit["BP"]),
-                "distance_bp": abs(int(hit["BP"]) - int(locus["bp_hg19"])),
+                "distance_bp": abs(int(hit["BP"]) - int(locus[bp_col])),
                 "our_A1": hit.get("A1", ""),
                 "our_A2": hit.get("A2", ""),
                 "our_A1_FREQ": hit.get("A1_FREQ", np.nan),

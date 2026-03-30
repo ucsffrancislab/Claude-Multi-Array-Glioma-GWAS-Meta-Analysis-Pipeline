@@ -102,10 +102,12 @@ def clump_by_distance(df: pd.DataFrame, p_threshold: float = 5e-8,
     return pd.DataFrame(loci)
 
 
-def annotate_gene_ensembl(chrom: str, pos: int, window: int = 50000) -> str:
-    """Query Ensembl GRCh37 REST API for nearest gene."""
+def annotate_gene_ensembl(chrom: str, pos: int, window: int = 50000,
+                          genome_build: str = "hg19") -> str:
+    """Query Ensembl REST API for nearest gene (GRCh37 or GRCh38)."""
     chrom_clean = str(chrom).replace("chr", "")
-    url = (f"https://grch37.rest.ensembl.org/overlap/region/human/"
+    host = "grch37.rest.ensembl.org" if genome_build == "hg19" else "rest.ensembl.org"
+    url = (f"https://{host}/overlap/region/human/"
            f"{chrom_clean}:{max(1, pos-window)}-{pos+window}"
            f"?feature=gene;content-type=application/json")
     try:
@@ -194,6 +196,8 @@ def main():
     parser.add_argument("--final-dir", required=True)
     parser.add_argument("--outdir", required=True)
     parser.add_argument("--p-threshold", type=float, default=5e-8)
+    parser.add_argument("--genome-build", default="hg19", choices=["hg19", "hg38"],
+                        help="Genome build (selects correct Ensembl API endpoint)")
     parser.add_argument("--clump-window", type=int, default=CLUMP_WINDOW)
     args = parser.parse_args()
 
@@ -234,7 +238,8 @@ def main():
     # Annotate with nearest gene
     log_substep("Gene annotation (Ensembl GRCh37)")
     for idx, row in loci.iterrows():
-        gene = annotate_gene_ensembl(row["CHR"], row["lead_BP"])
+        gene = annotate_gene_ensembl(row["CHR"], row["lead_BP"],
+                                        genome_build=args.genome_build)
         loci.at[idx, "nearest_gene"] = gene
         status = gene if gene else "no gene found"
         log_info(f"  Locus {row['locus_num']}: {row['lead_SNP']} -> {status}")

@@ -37,6 +37,7 @@ THREADS="${SLURM_CPUS_PER_TASK:-16}"
 MEMORY="${SLURM_MEM_PER_NODE:-120000}"
 MIN_DATASETS=2
 TEST_MODE=0
+GENOME_BUILD="hg38"
 
 print_usage() {
     cat <<EOF
@@ -57,7 +58,8 @@ Optional:
   --threads INT             Number of CPUs available [default: SLURM_CPUS_PER_TASK or 16]
   --memory INT              Memory in MB [default: SLURM_MEM_PER_NODE or 120000]
   --min-datasets INT        Minimum datasets for meta-analysis [default: 2]
-  --test                    Test mode: chr22 only, fast end-to-end validation
+  --test                    Test mode: chr22 only
+  --genome-build BUILD      hg19 or hg38 [default: hg19], fast end-to-end validation
 EOF
 }
 
@@ -74,6 +76,7 @@ while [[ $# -gt 0 ]]; do
         --memory)           MEMORY="$2";           shift 2 ;;
         --min-datasets)     MIN_DATASETS="$2";     shift 2 ;;
         --test)             TEST_MODE=1;           shift ;;
+        --genome-build)     GENOME_BUILD="$2";     shift 2 ;;
         -h|--help)          print_usage; exit 0 ;;
         *) echo "ERROR: Unknown option: $1" >&2; print_usage >&2; exit 1 ;;
     esac
@@ -111,6 +114,11 @@ fi
 
 if [[ -n "${IDH_SUBTYPE}" && "${IDH_SUBTYPE}" != "wt" && "${IDH_SUBTYPE}" != "mt" ]]; then
     echo "ERROR: --idh-subtype must be 'wt' or 'mt'" >&2
+    exit 1
+fi
+
+if [[ "${GENOME_BUILD}" != "hg19" && "${GENOME_BUILD}" != "hg38" ]]; then
+    echo "ERROR: --genome-build must be 'hg19' or 'hg38'" >&2
     exit 1
 fi
 
@@ -181,6 +189,7 @@ log_info "Threads:           ${THREADS}"
 log_info "Memory (MB):       ${MEMORY}"
 log_info "Min datasets:      ${MIN_DATASETS}"
 log_info "Test mode:         ${TEST_MODE}"
+log_info "Genome build:      ${GENOME_BUILD}"
 log_info "Pipeline dir:      ${PIPELINE_DIR}"
 log_info "Master log:        ${MASTER_LOG}"
 log_info "Started:           $(date)"
@@ -293,7 +302,7 @@ if [[ ${N_DATASETS} -lt ${MIN_DATASETS} ]]; then
 fi
 
 # Export variables for child scripts
-export OUTDIR PIPELINE_DIR CASE_LABEL IDH_SUBTYPE PQ_SUBTYPE
+export OUTDIR PIPELINE_DIR CASE_LABEL IDH_SUBTYPE PQ_SUBTYPE GENOME_BUILD
 export R2_THRESHOLD NUM_PCS PLINK_THREADS PLINK_MEMORY PARALLEL_JOBS
 export CHROMOSOMES TEST_MODE MIN_DATASETS
 
@@ -309,6 +318,7 @@ PARAMS_FILE="${OUTDIR}/logs/params.tsv"
     printf "num_pcs\t%s\n" "${NUM_PCS}"
     printf "min_datasets\t%s\n" "${MIN_DATASETS}"
     printf "test_mode\t%s\n" "${TEST_MODE}"
+    printf "genome_build\t%s\n" "${GENOME_BUILD}"
     printf "chromosomes\t%s\n" "${CHROMOSOMES}"
     printf "n_datasets\t%s\n" "${N_DATASETS}"
 } > "${PARAMS_FILE}"
@@ -478,6 +488,7 @@ set +e
 python3 "${PIPELINE_DIR}/scripts/08_clump_annotate.py" \
     --params "${PARAMS_FILE}" \
     --final-dir "${OUTDIR}/final" \
+    --genome-build "${GENOME_BUILD}" \
     --outdir "${OUTDIR}/final/plots"
 STEP_EXIT=$?
 set -e
@@ -501,6 +512,7 @@ if [[ -f "${KNOWN_LOCI_FILE}" ]]; then
         --params "${PARAMS_FILE}" \
         --final-dir "${OUTDIR}/final" \
         --known-loci "${KNOWN_LOCI_FILE}" \
+        --genome-build "${GENOME_BUILD}" \
         --outdir "${OUTDIR}/final/plots"
     STEP_EXIT=$?
     set -e

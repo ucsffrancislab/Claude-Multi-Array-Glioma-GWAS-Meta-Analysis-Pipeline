@@ -1,3 +1,2 @@
 __pycache__/
-pipeline_updates_v2.tar.gz
-pipeline_updates.tar.gz
+pipeline_updates*.tar.gz
