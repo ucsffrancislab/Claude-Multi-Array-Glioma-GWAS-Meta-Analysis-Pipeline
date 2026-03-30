@@ -153,6 +153,11 @@ mkdir -p "${OUTDIR}/final/plots"
 MASTER_LOG="${OUTDIR}/logs/pipeline_$(date '+%Y%m%d_%H%M%S').log"
 exec >> "${MASTER_LOG}" 2>&1
 
+# Trap signals so SLURM timeouts/cancellations are logged
+trap 'echo "[$(date "+%Y-%m-%d %H:%M:%S")] [ERROR] Pipeline killed by signal SIGTERM (likely SLURM timeout or scancel)" >> "${MASTER_LOG}"' TERM
+trap 'echo "[$(date "+%Y-%m-%d %H:%M:%S")] [ERROR] Pipeline killed by signal SIGINT" >> "${MASTER_LOG}"' INT
+trap 'echo "[$(date "+%Y-%m-%d %H:%M:%S")] [ERROR] Pipeline killed by signal SIGHUP" >> "${MASTER_LOG}"' HUP
+
 # Now enable strict mode (after redirect so errors are captured)
 set -euo pipefail
 
@@ -199,7 +204,10 @@ else
 fi
 
 # Calculate parallelism
-PLINK_THREADS=2
+# Use 4 threads per PLINK2 job to reduce concurrent jobs and give each
+# more memory headroom. Large VCF dosage loading can spike well above
+# PLINK2's --memory setting.
+PLINK_THREADS=4
 PARALLEL_JOBS=$(( THREADS / PLINK_THREADS ))
 if [[ ${PARALLEL_JOBS} -lt 1 ]]; then
     PARALLEL_JOBS=1
@@ -207,8 +215,10 @@ if [[ ${PARALLEL_JOBS} -lt 1 ]]; then
 fi
 log_info "Parallelism: ${PARALLEL_JOBS} concurrent jobs x ${PLINK_THREADS} threads each"
 
-PLINK_MEMORY=$(( MEMORY / PARALLEL_JOBS ))
-log_info "Per-job memory: ${PLINK_MEMORY} MB"
+# Reserve 70% of per-job memory for PLINK2's --memory flag.
+# VCF dosage loading uses additional memory beyond --memory, so we need headroom.
+PLINK_MEMORY=$(( (MEMORY / PARALLEL_JOBS) * 70 / 100 ))
+log_info "Per-job memory: ${PLINK_MEMORY} MB (of $(( MEMORY / PARALLEL_JOBS )) MB total per job)"
 
 # =============================================================================
 # Load environment modules

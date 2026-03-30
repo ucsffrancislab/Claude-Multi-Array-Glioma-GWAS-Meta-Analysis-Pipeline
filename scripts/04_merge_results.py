@@ -145,6 +145,13 @@ def merge_dataset(ds: str, gwas_dir: str, outdir: str) -> str | None:
     if n_before != n_after:
         log_warn(f"  Removed {n_before - n_after} variants with invalid stats")
 
+    # Remove duplicate SNP IDs (keep the one with smallest P-value)
+    n_before_dedup = len(out)
+    out = out.sort_values("P").drop_duplicates(subset="SNP", keep="first")
+    n_dupes = n_before_dedup - len(out)
+    if n_dupes > 0:
+        log_warn(f"  Removed {n_dupes} duplicate SNPs (kept smallest P)")
+
     # Sort by chromosome and position
     out = out.sort_values(["CHR", "BP"]).reset_index(drop=True)
 
