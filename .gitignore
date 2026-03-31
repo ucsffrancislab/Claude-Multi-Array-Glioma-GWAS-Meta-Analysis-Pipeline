@@ -1,2 +1,7 @@
 __pycache__/
 pipeline_updates*.tar.gz
+pipeline_patch_*.tar.gz
+pipeline_description.aux
+pipeline_description.log
+pipeline_description.out
+pipeline_description.toc

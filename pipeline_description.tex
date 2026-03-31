@@ -1,0 +1,366 @@
+\documentclass[11pt,letterpaper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{parskip}
+
+\hypersetup{colorlinks=true, linkcolor=blue!60!black, urlcolor=blue!60!black, citecolor=blue!60!black}
+
+\titleformat{\section}{\large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{1em}{}
+
+\title{\textbf{Glioma GWAS Meta-Analysis Pipeline}\\[0.3em]
+\large Technical Description and Design Rationale}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\tableofcontents
+\newpage
+
+% ============================================================================
+\section{Overview}
+
+This pipeline performs per-dataset genome-wide association analysis followed by inverse-variance weighted (IVW) fixed-effects meta-analysis across four genotyping array datasets for glioma susceptibility. It is designed to be run five times with different case definitions to produce subtype-specific summary statistics:
+
+\begin{enumerate}[nosep]
+    \item \textbf{All glioma} --- all cases vs.\ all controls
+    \item \textbf{IDH wildtype} --- IDH-wt cases vs.\ all controls
+    \item \textbf{IDH mutant} --- IDH-mut cases vs.\ all controls
+    \item \textbf{IDH mutant, 1p/19q intact} --- IDH-mut with intact 1p/19q vs.\ all controls
+    \item \textbf{IDH mutant, 1p/19q co-deleted} --- IDH-mut with 1p/19q codeletion vs.\ all controls
+\end{enumerate}
+
+Controls remain the same across all five analyses. This design allows direct comparison of genetic risk profiles across molecular subtypes of glioma.
+
+The pipeline runs within a single SLURM job and parallelizes internally using GNU \texttt{parallel}. All output, including logs, intermediate files, and final results, is written to a user-specified output directory.
+
+% ============================================================================
+\section{Input Data}
+
+\subsection{Imputed Genotype Data}
+
+Per-chromosome dosage VCF files from the Michigan Imputation Server, one set per dataset (array). Each dataset was genotyped on a different Illumina array, quality-controlled independently, and imputed to a common reference panel. The VCFs contain dosage fields (DS) representing imputed allele probabilities.
+
+\textbf{Why separate imputation per array:} Different genotyping arrays capture different sets of directly genotyped variants. Imputation accuracy depends on the set of input markers, so imputing each array independently produces dataset-specific quality metrics (R\textsuperscript{2}) that should not be averaged across arrays.
+
+\subsection{Covariate Files}
+
+One CSV per dataset containing sample-level phenotype and covariate information: sample ID, case/control status, IDH mutation status, 1p/19q codeletion status, age, sex, recruitment source, principal components (PCs), and an exclusion flag.
+
+\subsection{Dataset Configuration}
+
+A tab-separated file mapping dataset names to their VCF directories and covariate files. This allows the pipeline to iterate over an arbitrary number of datasets without hard-coding paths.
+
+% ============================================================================
+\section{Pipeline Steps}
+
+% --- Step 1 ---
+\subsection{Step 1: Phenotype Preparation}
+\label{sec:step1}
+
+\textbf{Script:} \texttt{01\_prep\_phenotypes.py}
+
+For each dataset, this step:
+
+\begin{enumerate}[nosep]
+    \item Loads the covariate CSV and removes excluded samples (\texttt{exclude=1}).
+    \item Assigns phenotype codes using PLINK2 conventions (2 = case, 1 = control). Cases are filtered by the requested IDH/1p/19q subtype; cases not matching the subtype receive NA and are excluded from that run. Controls always receive phenotype 1 regardless of subtype.
+    \item Encodes sex as a numeric covariate (Female = 0, Male = 1). Values are first coerced to strings to handle mixed numeric/string encodings and NaN-induced float types.
+    \item Checks covariate missingness within cases and controls separately. If any covariate exceeds 50\% missingness in either group, it is dropped for that dataset to prevent instability.
+    \item Auto-detects whether the \texttt{source} variable (recruitment site) should be included as a covariate.
+    \item Dummy-codes source into $k - 1$ binary indicator variables for PLINK2, which does not natively handle categorical covariates.
+    \item Writes a PLINK2-compatible tab-separated phenotype/covariate file per dataset.
+\end{enumerate}
+
+\textbf{Source covariate decision:} The source variable is included only when it has variation within \emph{both} cases and controls. If source is perfectly confounded with case/control status (e.g., all cases from one site, all controls from another), including it would be collinear with the outcome and cause model failure. The pipeline detects this automatically and omits source for such datasets.
+
+\textbf{Minimum sample threshold:} Datasets with fewer than 10 cases for the requested subtype are skipped entirely, as logistic regression would be unreliable.
+
+% --- Step 2 ---
+\subsection[Step 2: Imputation Quality Filtering]{Step 2: Imputation Quality Filtering}
+\label{sec:step2}
+
+\textbf{Script:} \texttt{02\_filter\_vcf.sh}
+
+Each per-chromosome VCF is filtered using \texttt{bcftools} to retain only variants meeting a minimum imputation quality threshold (R\textsuperscript{2} $\geq$ user-specified value, default 0.3).
+
+\textbf{R\textsuperscript{2} field detection:} Michigan Imputation Server VCFs store imputation quality under different INFO field names depending on the server version (\texttt{R2}, \texttt{DR2}, or \texttt{INFO}). The script parses all \texttt{\#\#INFO} header lines and selects the appropriate field automatically, preferring \texttt{R2} $>$ \texttt{DR2} $>$ \texttt{INFO} (with the \texttt{INFO} match tightened to \texttt{Number=1,Type=Float} to avoid false positives).
+
+\textbf{Per-dataset filtering:} R\textsuperscript{2} thresholds are applied independently per dataset because the same variant may impute well on one array and poorly on another. A variant failing in one dataset can still contribute through the others.
+
+\textbf{Parallelism:} All dataset $\times$ chromosome combinations are run concurrently via GNU \texttt{parallel}, with the number of concurrent jobs determined by the available CPU cores.
+
+% --- Step 3 ---
+\subsection{Step 3: Per-Dataset GWAS}
+\label{sec:step3}
+
+\textbf{Script:} \texttt{03\_run\_gwas.sh}
+
+For each dataset and chromosome, PLINK2 performs logistic regression on imputed dosages:
+
+\begin{verbatim}
+plink2 --vcf {filtered_vcf} dosage=DS \
+       --glm firth-fallback hide-covar \
+       --pheno {dataset}.pheno --pheno-name pheno \
+       --covar {dataset}.pheno --covar-name {covariates} \
+       --covar-variance-standardize \
+       --mac 20 --vif 100 --ci 0.95
+\end{verbatim}
+
+\textbf{Key parameters and rationale:}
+
+\begin{itemize}[nosep]
+    \item \texttt{dosage=DS}: Uses imputed dosages rather than hard-called genotypes, preserving imputation uncertainty in the association test.
+    \item \texttt{firth-fallback}: Standard logistic regression is used when it converges normally. When separation or quasi-separation occurs (common with rare variants or small cell counts), Firth-penalized logistic regression is used automatically. This avoids inflated or infinite odds ratios without requiring a blanket penalty on all variants.
+    \item \texttt{--mac 20}: Requires at least 20 copies of the minor allele across all samples. This provides a dataset-adaptive MAF floor that filters unreliable rare variant associations. With a typical dataset of $\sim$2,000 samples, this corresponds roughly to MAF $\geq$ 0.5\%.
+    \item \texttt{--vif 100}: Variance inflation factor check to detect multicollinearity among covariates. The threshold of 100 is permissive but catches severe collinearity (e.g., redundant source dummies).
+    \item \texttt{--covar-variance-standardize}: Standardizes all numeric covariates to zero mean and unit variance before fitting. This improves numerical stability when covariates are on different scales (e.g., age in years vs.\ PC loadings).
+    \item \texttt{--ci 0.95}: Outputs 95\% confidence intervals for the odds ratio.
+    \item \texttt{hide-covar}: Suppresses per-covariate test statistics, retaining only the genotype (ADD) test.
+\end{itemize}
+
+\textbf{Covariates:} Age, sex, source (where appropriate, as dummy variables), and PC1--PC8. The exact set of covariates is determined per dataset based on Step 1's missingness and source-adjustment decisions. The covariate list is parsed directly from the phenotype file header, ensuring consistency.
+
+\textbf{Parallelism:} PLINK2 jobs run concurrently across dataset $\times$ chromosome combinations. Each job receives 4 threads and 70\% of its proportional memory share, leaving 30\% headroom for VCF dosage loading spikes.
+
+% --- Step 4 ---
+\subsection{Step 4: Merge Per-Chromosome Results}
+\label{sec:step4}
+
+\textbf{Script:} \texttt{04\_merge\_results.py}
+
+For each dataset, per-chromosome PLINK2 output files are concatenated into a single file. During merging:
+
+\begin{enumerate}[nosep]
+    \item Only ADD test rows are retained (excluding any covariate test rows).
+    \item Variant IDs are standardized to \texttt{CHR:POS:REF:ALT} format for unambiguous cross-dataset matching.
+    \item $\log(\text{OR})$ is computed as BETA for METAL input (PLINK2 reports OR for logistic regression; METAL expects effect sizes on the log scale).
+    \item The SE column is identified flexibly (\texttt{LOG(OR)\_SE} or \texttt{SE} depending on PLINK2 version).
+    \item QC filters remove variants with invalid, missing, or infinite statistics.
+    \item Duplicate variant IDs (which can arise from multi-allelic sites) are resolved by keeping the entry with the smallest P-value.
+\end{enumerate}
+
+The output is formatted with the column names expected by METAL: \texttt{SNP}, \texttt{A1}, \texttt{A2}, \texttt{BETA}, \texttt{SE}, \texttt{P}, \texttt{N}, \texttt{A1\_FREQ}.
+
+% --- Step 5 ---
+\subsection{Step 5: Meta-Analysis}
+\label{sec:step5}
+
+\textbf{Script:} \texttt{05\_run\_metal.py}
+
+The pipeline generates and executes a METAL command script implementing IVW fixed-effects meta-analysis:
+
+\begin{verbatim}
+SCHEME   STDERR          # Inverse-variance weighting
+GENOMICCONTROL ON        # Per-study GC correction
+HETEROGENEITY ON         # Cochran's Q and I-squared
+AVERAGEFREQ ON           # Track allele frequencies
+\end{verbatim}
+
+\textbf{STDERR scheme:} Weights each study by $1/\text{SE}^2$, which is equivalent to weighting by effective sample size when the phenotype scale is consistent. This is the standard approach for combining logistic regression results across studies.
+
+\textbf{Per-study genomic control:} Before combining, each study's test statistics are corrected by its genomic inflation factor ($\lambda_\text{GC}$). This accounts for residual population stratification that PCs may not fully capture, which can differ across studies due to different recruitment populations.
+
+\textbf{Allele alignment:} METAL automatically aligns effect alleles across studies using the A1/A2 columns, handling strand flips and allele swaps.
+
+\textbf{No requirement for variants in all datasets:} METAL processes whatever variants are available in each study file. A variant present in only 2 of 4 datasets still contributes to the meta-analysis. The output includes $N_\text{STUDIES}$ and Direction columns for downstream filtering.
+
+% --- Step 6 ---
+\subsection{Step 6: Post-Meta QC}
+\label{sec:step6}
+
+\textbf{Script:} \texttt{06\_post\_meta\_qc.py}
+
+This step processes the raw METAL output into publication-ready summary statistics:
+
+\begin{enumerate}[nosep]
+    \item \textbf{Genomic inflation:} Computes $\lambda_\text{GC}$ for the meta-analysis and per dataset, plus $\lambda_{1000}$ (lambda scaled to an effective sample size of 1000) to enable cross-study comparisons.
+    \item \textbf{Dataset count filter:} Removes variants present in fewer than \texttt{min\_datasets} (default 2) studies.
+    \item \textbf{Odds ratios:} Computes OR and 95\% CI from the meta-analysis BETA and SE.
+    \item \textbf{Per-variant case/control counts:} For each variant, estimates the number of cases and controls that contributed, using per-variant observation counts (OBS\_CT from PLINK2) combined with each dataset's case/control ratio. This accounts for per-variant missingness, which is more accurate than using dataset-level totals.
+    \item \textbf{Significant hits:} Extracts variants reaching genome-wide significance ($P < 5 \times 10^{-8}$) and suggestive significance ($P < 10^{-5}$).
+    \item \textbf{Outputs:} Compressed summary statistics, genome-wide significant hits table, analysis summary, and per-dataset lambda table.
+\end{enumerate}
+
+% --- Step 7 ---
+\subsection{Step 7: Visualization}
+\label{sec:step7}
+
+\textbf{Script:} \texttt{07\_plots.py}
+
+Generates the following outputs:
+
+\begin{itemize}[nosep]
+    \item \textbf{Manhattan plot:} Genome-wide association results with significance thresholds at $5 \times 10^{-8}$ and $10^{-5}$.
+    \item \textbf{QQ plot:} Observed vs.\ expected $-\log_{10}(P)$ for the meta-analysis, with per-dataset QQ curves overlaid. Each curve is annotated with its $\lambda_\text{GC}$.
+    \item \textbf{Per-dataset standalone QQ plots:} Individual QQ plots for each dataset for clearer inspection.
+    \item \textbf{Forest plots:} Per-dataset effect sizes with 95\% CI for each genome-wide significant hit (up to 20), with per-dataset effects aligned to the meta-analysis effect allele.
+    \item \textbf{MAF vs.\ effect size plot:} Scatterplot of minor allele frequency vs.\ absolute BETA, colored by significance level, to identify potential small-sample artifacts at low MAF.
+    \item \textbf{Heterogeneity distribution:} Histogram of $I^2$ values across all variants, with reference lines at 25\%, 50\%, and 75\%.
+    \item \textbf{Top hits table:} Top 50 variants by P-value with effect estimates, frequencies, and heterogeneity statistics.
+    \item \textbf{Sample summary table:} Case/control counts per dataset with totals.
+    \item \textbf{Filtering funnel table:} Variant counts at each pipeline stage.
+    \item \textbf{Per-dataset concordance table:} Effect sizes, SE, and P-values from each individual dataset for significant meta-analysis hits, with alleles aligned.
+\end{itemize}
+
+% --- Step 8 ---
+\subsection{Step 8: Clumping and Gene Annotation}
+\label{sec:step8}
+
+\textbf{Script:} \texttt{08\_clump\_annotate.py}
+
+\textbf{Distance-based clumping:} Genome-wide significant variants are grouped into independent loci using a 500\,kb window. Within each window, the variant with the smallest P-value is designated the lead SNP. This is a conservative approximation of LD-based clumping that does not require a reference panel.
+
+\textbf{Gene annotation:} Each lead SNP is annotated with its nearest protein-coding gene by querying the Ensembl REST API (GRCh37 or GRCh38 depending on the \texttt{--genome-build} parameter). If the API is unavailable (e.g., on air-gapped compute nodes), gene names are left blank.
+
+\textbf{Regional association plots:} For each independent locus, a regional plot shows $-\log_{10}(P)$ for all variants within the 500\,kb window, with the lead SNP highlighted.
+
+\textbf{Output:} An independent loci summary table listing each locus with its lead SNP, position, effect estimates, allele frequency, heterogeneity statistics, number of significant variants in the locus, and nearest gene.
+
+% --- Step 9 ---
+\subsection{Step 9: Known Glioma Loci Replication}
+\label{sec:step9}
+
+\textbf{Script:} \texttt{09\_known\_loci.py}
+
+This step checks replication at 28 established glioma GWAS risk loci compiled from Shete et al.\ (2009), Sanson et al.\ (2011), Jenkins et al.\ (2012), Kinnersley et al.\ (2015), and Melin et al.\ (2017). For each known locus, the pipeline searches within a $\pm$500\,kb window around the reported lead SNP position and reports:
+
+\begin{itemize}[nosep]
+    \item The most significant variant in the region from the current analysis
+    \item Effect size, P-value, odds ratio, and confidence interval
+    \item Direction of effect across datasets
+    \item Whether replication reaches nominal ($P < 0.05$), Bonferroni-corrected ($P < 0.05/28$), or genome-wide significance
+\end{itemize}
+
+The reference file includes positions in both hg19 and hg38 coordinate systems, selectable via the \texttt{--genome-build} parameter.
+
+\textbf{Purpose:} Replication at known loci serves as a positive control for the pipeline. Failure to replicate well-established loci (particularly high-effect variants like rs55705857 at 8q24.21 for non-GBM glioma) would indicate a problem with the data or analysis.
+
+% --- Step 10 ---
+\subsection{Step 10: Cross-Subtype Comparison (Standalone)}
+\label{sec:step10}
+
+\textbf{Script:} \texttt{10\_cross\_subtype.py}
+
+Run manually after all five subtype analyses are complete, this script:
+
+\begin{enumerate}[nosep]
+    \item Collects the union of genome-wide significant variants across all subtypes.
+    \item Looks up each variant's effect size and P-value in every subtype's summary statistics.
+    \item Produces a cross-subtype comparison table.
+    \item Generates pairwise BETA correlation plots between subtypes.
+    \item Generates a $-\log_{10}(P)$ heatmap across all subtypes at top loci.
+\end{enumerate}
+
+This enables identification of subtype-specific vs.\ shared genetic risk factors, which is a central question in glioma genetics given the known molecular heterogeneity between IDH-wildtype (primarily GBM) and IDH-mutant tumors.
+
+% ============================================================================
+\section{Design Decisions}
+
+\subsection{Per-Dataset GWAS Followed by Meta-Analysis}
+
+Performing GWAS within each dataset before combining results is the standard approach for multi-array studies and is used by all major GWAS consortia. The alternative---pooling all samples and running a single GWAS---would conflate array-specific technical artifacts with genetic effects. Array-specific batch effects (different probe sets, different genotype calling algorithms, different imputation inputs) can create systematic allele frequency differences between datasets that mimic genetic associations.
+
+\subsection{IVW Fixed-Effects vs.\ Random-Effects Meta-Analysis}
+
+Fixed-effects meta-analysis assumes all studies estimate the same underlying effect. This is appropriate here because: (a) all four datasets are drawn from the same ethnic population (European), (b) the phenotype definition is identical across datasets, and (c) the primary goal is to maximize power for detecting common variants with consistent effects. Heterogeneity is still computed ($I^2$, Cochran's Q) and reported, allowing post-hoc identification of variants with inconsistent effects.
+
+\subsection{Firth Fallback Rather Than Blanket Firth Penalization}
+
+Full Firth penalization reduces bias for all variants but at a cost to power. The fallback approach uses standard maximum likelihood estimation (which is unbiased and maximally powered) for the majority of variants where the model converges normally, and applies Firth penalization only where separation is detected. This is the recommended default in PLINK2 for binary traits.
+
+\subsection{Per-Study Genomic Control}
+
+Applying genomic control within each study before meta-analysis corrects for residual stratification that study-specific PC adjustment may not fully capture. This is particularly important in a multi-study design where each study may have different levels of residual stratification. The alternative---applying GC only to the meta-analysis---could under-correct if one study drives the majority of inflation.
+
+\subsection{Shared Controls Across Subtypes}
+
+All five subtype analyses use the same control group. This is standard for molecular subtype analyses of the same disease, as controls are cancer-free regardless of glioma subtype. It maximizes statistical power and ensures that differences between subtype results reflect genuine genetic heterogeneity rather than differences in control populations. This design should be noted when comparing results across subtypes, as the analyses are not fully independent.
+
+\subsection{Minimum Allele Count Rather Than MAF Threshold}
+
+A fixed \texttt{--mac 20} filter adapts to the sample size of each dataset. In a dataset with 2,000 samples, MAC $\geq$ 20 corresponds approximately to MAF $\geq$ 0.5\%; in a dataset with 500 samples, it corresponds to MAF $\geq$ 2\%. This ensures reliable association estimates regardless of dataset size, whereas a fixed MAF threshold might be too liberal for small datasets or too conservative for large ones.
+
+\subsection{R-squared Filtering Per Dataset}
+
+A variant that imputes well on one array may impute poorly on another, depending on the set of directly genotyped tag SNPs. Applying the R\textsuperscript{2} threshold independently per dataset preserves maximum information: a variant that passes in 3 of 4 datasets still contributes three studies to the meta-analysis rather than being discarded entirely.
+
+\subsection{No Requirement for Variants in All Datasets}
+
+Requiring a variant to be present in all four datasets would discard valid information. Variants in fewer datasets simply have larger standard errors and contribute less weight to the meta-analysis. The \texttt{N\_STUDIES} and \texttt{Direction} columns in the output allow downstream filtering if desired.
+
+% ============================================================================
+\section{Error Handling}
+
+Steps 1--3 are critical for producing per-dataset GWAS results. Step 1 terminates on failure. Steps 2 and 3 check for output files and terminate if none are produced.
+
+Steps 4--6 are sequential dependencies: merged results are required for METAL, and METAL output is required for post-meta QC. Each of these steps terminates the pipeline on failure (\texttt{die}).
+
+Steps 7--9 (visualization, clumping, known loci) are non-fatal. If any of these fail, the pipeline logs the error and continues, since the core analytical outputs from Step 6 are already complete.
+
+% ============================================================================
+\section{Output Structure}
+
+All outputs are written to \texttt{\{outdir\}/} with the following structure:
+
+\begin{verbatim}
+{outdir}/
+|---- logs/                           # All log files
+|---- phenotypes/                     # Phenotype files + sample summary
+|---- filtered_vcf/{dataset}/         # R2-filtered VCFs
+|---- gwas/{dataset}/                 # Per-chr and merged GWAS results
+|---- metal/                          # METAL script, output, log
+`---- final/
+    |---- {label}_meta_summary_stats.tsv.gz  # Full summary statistics
+    |---- {label}_gw_significant.tsv         # P < 5e-8 hits
+    |---- {label}_analysis_summary.tsv       # Lambda, hit counts
+    |---- {label}_per_dataset_lambda.tsv     # Per-dataset inflation
+    `---- plots/
+        |---- {label}_manhattan.png/pdf
+        |---- {label}_qq.png/pdf
+        |---- {label}_qq_{dataset}.png/pdf
+        |---- {label}_forest.png/pdf
+        |---- {label}_maf_vs_effect.png/pdf
+        |---- {label}_heterogeneity_dist.png/pdf
+        |---- {label}_top_hits.tsv
+        |---- {label}_sample_table.tsv
+        |---- {label}_filtering_funnel.tsv
+        |---- {label}_concordance.tsv
+        |---- {label}_independent_loci.tsv
+        |---- {label}_regional_locus*.png/pdf
+        `---- {label}_known_loci_replication.tsv
+\end{verbatim}
+
+% ============================================================================
+\section{Software Requirements}
+
+\begin{itemize}[nosep]
+    \item \textbf{PLINK2} $\geq$ 2.00a3 --- association testing
+    \item \textbf{METAL} --- meta-analysis
+    \item \textbf{bcftools} $\geq$ 1.15 --- VCF filtering
+    \item \textbf{GNU parallel} --- job-level parallelism
+    \item \textbf{Python 3.8+} with pandas, numpy, scipy, matplotlib
+\end{itemize}
+
+% ============================================================================
+\section{References}
+
+\begin{enumerate}[nosep]
+    \item Shete S, et al.\ Genome-wide association study identifies five susceptibility loci for glioma. \textit{Nat Genet} 41:899--904 (2009).
+    \item Sanson M, et al.\ Chromosome 7p11.2 (EGFR) variation influences glioma risk. \textit{Hum Mol Genet} 20:2897--2904 (2011).
+    \item Jenkins RB, et al.\ A low-frequency variant at 8q24.21 is strongly associated with risk of oligodendroglial tumors and astrocytomas with IDH1 or IDH2 mutation. \textit{Nat Genet} 44:1122--1125 (2012).
+    \item Kinnersley B, et al.\ Genome-wide association study identifies multiple susceptibility loci for glioma. \textit{Nat Commun} 6:8559 (2015).
+    \item Melin BS, et al.\ Genome-wide association study of glioma subtypes identifies specific differences in genetic susceptibility to glioblastoma and non-glioblastoma tumors. \textit{Nat Genet} 49:789--794 (2017).
+    \item Willer CJ, Li Y, Abecasis GR. METAL: fast and efficient meta-analysis of genomewide association scans. \textit{Bioinformatics} 26:2190--2191 (2010).
+    \item Chang CC, et al.\ Second-generation PLINK: rising to the challenge of larger and richer datasets. \textit{GigaScience} 4:7 (2015).
+\end{enumerate}
+
+\end{document}
