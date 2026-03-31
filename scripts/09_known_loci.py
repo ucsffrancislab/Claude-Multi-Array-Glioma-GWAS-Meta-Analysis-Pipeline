@@ -109,7 +109,7 @@ def main():
         row = {
             "cytoband": locus["cytoband"],
             "known_rsid": locus["rsid"],
-            "known_gene": locus["gene"],
+            "known_gene": str(locus.get("gene", "")),
             "known_chr": locus["chr"],
             "known_bp_hg19": locus.get("bp_hg19", ""),
             "known_bp_hg38": locus.get("bp_hg38", ""),
@@ -156,8 +156,8 @@ def main():
             })
             status = "NOT FOUND"
 
-        log_info(f"  {locus['cytoband']:12s} {locus['rsid']:15s} "
-                 f"({locus['gene']:12s}) -> {status}")
+        log_info(f"  {str(locus['cytoband']):12s} {str(locus['rsid']):15s} "
+                 f"({str(locus.get('gene', '')):12s}) -> {status}")
         results.append(row)
 
     results_df = pd.DataFrame(results)
@@ -182,7 +182,7 @@ def main():
     # Log summary table
     log_table(
         ["Cytoband", "Gene", "Known rsID", "Our P", "Our OR", "Replicated"],
-        [[r["cytoband"], r["known_gene"], r["known_rsid"],
+        [[str(r["cytoband"]), str(r["known_gene"]), str(r["known_rsid"]),
           f"{float(r['our_P']):.2e}" if pd.notna(r["our_P"]) else "N/A",
           f"{r['our_OR']:.3f}" if pd.notna(r["our_OR"]) else "N/A",
           "GW" if r["replicated_gw"] else
