@@ -12,8 +12,7 @@
 #
 # Usage:
 #   sbatch --job-name=idhmt_intact \
-#          run_pipeline.sh \
-#          --pipeline-dir /path/to/gwas_meta_pipeline \
+#          /path/to/gwas_meta_pipeline/run_pipeline.sh \
 #          --outdir results/idhmt_intact \
 #          --idh-subtype mt --pq-subtype intact \
 #          --datasets-config config/datasets.tsv
@@ -23,9 +22,17 @@
 
 # --- Parse arguments BEFORE set -e so usage errors print cleanly ---
 
-# Default PIPELINE_DIR from script location (works interactively, breaks under SLURM).
-# Override with --pipeline-dir when submitting via sbatch.
-PIPELINE_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Locate the directory this script lives in.
+# Under SLURM, sbatch copies the script to a spool directory so dirname "$0"
+# points to the wrong place. Use scontrol to recover the original path.
+# Outside SLURM (interactive/local), dirname "$0" works fine.
+# Can still be overridden with --pipeline-dir if needed.
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    PIPELINE_DIR=$(dirname "$(scontrol show job "$SLURM_JOB_ID" \
+        | awk '/Command=/{sub(/.*Command=/, ""); print $1}')")
+else
+    PIPELINE_DIR="$(cd "$(dirname "$0")" && pwd)"
+fi
 
 OUTDIR=""
 IDH_SUBTYPE=""
@@ -46,7 +53,7 @@ Usage: $(basename "$0") [OPTIONS]
 Required:
   --outdir DIR              Output directory (must be unique per run)
   --datasets-config FILE    TSV with dataset/vcf_dir/covariate_file columns
-  --pipeline-dir DIR        Path to pipeline install directory [default: dirname of this script]
+  --pipeline-dir DIR        Override auto-detected pipeline directory [default: auto]
 
 Case definition (combine to define subtype):
   --idh-subtype TYPE        wt or mt (omit for all glioma)
@@ -92,8 +99,7 @@ fi
 
 if [[ ! -d "${PIPELINE_DIR}/scripts" ]]; then
     echo "ERROR: Pipeline scripts not found in: ${PIPELINE_DIR}/scripts" >&2
-    echo "  SLURM copies scripts to a temp dir, breaking relative paths." >&2
-    echo "  Use --pipeline-dir /path/to/gwas_meta_pipeline" >&2
+    echo "  If auto-detection failed, use --pipeline-dir /path/to/gwas_meta_pipeline" >&2
     exit 1
 fi
 
