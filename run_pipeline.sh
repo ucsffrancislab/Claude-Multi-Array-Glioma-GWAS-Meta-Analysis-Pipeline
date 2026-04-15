@@ -45,6 +45,8 @@ MEMORY="${SLURM_MEM_PER_NODE:-120000}"
 MIN_DATASETS=2
 TEST_MODE=0
 GENOME_BUILD="hg38"
+MAF_THRESHOLD=0.01
+HWE_THRESHOLD=1e-6
 
 print_usage() {
     cat <<EOF
@@ -66,7 +68,9 @@ Optional:
   --memory INT              Memory in MB [default: SLURM_MEM_PER_NODE or 120000]
   --min-datasets INT        Minimum datasets for meta-analysis [default: 2]
   --test                    Test mode: chr22 only
-  --genome-build BUILD      hg19 or hg38 [default: hg19], fast end-to-end validation
+  --genome-build BUILD      hg19 or hg38 [default: hg38]
+  --maf FLOAT               Minor allele frequency threshold [default: 0.01]
+  --hwe FLOAT               Hardy-Weinberg p-value threshold in controls [default: 1e-6]
 EOF
 }
 
@@ -84,6 +88,8 @@ while [[ $# -gt 0 ]]; do
         --min-datasets)     MIN_DATASETS="$2";     shift 2 ;;
         --test)             TEST_MODE=1;           shift ;;
         --genome-build)     GENOME_BUILD="$2";     shift 2 ;;
+        --maf)              MAF_THRESHOLD="$2";    shift 2 ;;
+        --hwe)              HWE_THRESHOLD="$2";    shift 2 ;;
         -h|--help)          print_usage; exit 0 ;;
         *) echo "ERROR: Unknown option: $1" >&2; print_usage >&2; exit 1 ;;
     esac
@@ -190,6 +196,8 @@ log_info "1p/19q subtype:   ${PQ_SUBTYPE:-all}"
 log_info "Output directory:  $(cd "${OUTDIR}" && pwd)"
 log_info "Datasets config:   ${DATASETS_CONFIG}"
 log_info "R² threshold:      ${R2_THRESHOLD}"
+log_info "MAF threshold:     ${MAF_THRESHOLD}"
+log_info "HWE threshold:     ${HWE_THRESHOLD}"
 log_info "PCs:               ${NUM_PCS}"
 log_info "Threads:           ${THREADS}"
 log_info "Memory (MB):       ${MEMORY}"
@@ -309,7 +317,7 @@ fi
 
 # Export variables for child scripts
 export OUTDIR PIPELINE_DIR CASE_LABEL IDH_SUBTYPE PQ_SUBTYPE GENOME_BUILD
-export R2_THRESHOLD NUM_PCS PLINK_THREADS PLINK_MEMORY PARALLEL_JOBS
+export R2_THRESHOLD MAF_THRESHOLD HWE_THRESHOLD NUM_PCS PLINK_THREADS PLINK_MEMORY PARALLEL_JOBS
 export CHROMOSOMES TEST_MODE MIN_DATASETS
 
 # Write params file for Python scripts
@@ -321,6 +329,8 @@ PARAMS_FILE="${OUTDIR}/logs/params.tsv"
     printf "idh_subtype\t%s\n" "${IDH_SUBTYPE}"
     printf "pq_subtype\t%s\n" "${PQ_SUBTYPE}"
     printf "r2_threshold\t%s\n" "${R2_THRESHOLD}"
+    printf "maf_threshold\t%s\n" "${MAF_THRESHOLD}"
+    printf "hwe_threshold\t%s\n" "${HWE_THRESHOLD}"
     printf "num_pcs\t%s\n" "${NUM_PCS}"
     printf "min_datasets\t%s\n" "${MIN_DATASETS}"
     printf "test_mode\t%s\n" "${TEST_MODE}"
