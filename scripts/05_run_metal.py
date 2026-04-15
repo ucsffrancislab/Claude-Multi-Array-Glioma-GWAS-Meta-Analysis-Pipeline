@@ -99,7 +99,8 @@ def main():
         "FREQLABEL A1_FREQ",
         "",
         "# Enable heterogeneity analysis (Cochran's Q, I²)",
-        "HETEROGENEITY ON",
+        "# We this that this line generates an error so commented out for the time being",
+        "# HETEROGENEITY ON",
         "",
     ]
 
