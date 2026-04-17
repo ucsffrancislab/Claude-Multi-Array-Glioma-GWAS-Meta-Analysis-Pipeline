@@ -63,6 +63,17 @@ def merge_dataset(ds: str, gwas_dir: str, outdir: str) -> str | None:
     merged = pd.concat(chunks, ignore_index=True)
     log_info(f"  Total variants after merge: {len(merged)}")
 
+    # Coerce numeric columns. PLINK2 writes literal "NA" for variants where
+    # logistic regression failed to converge / hit quasi-separation (more common
+    # in smaller case sets like IDH-mutant subtypes). A single "NA" token makes
+    # pd.read_csv infer the column as object dtype, which then breaks np.log and
+    # downstream arithmetic. Coerce -> invalid values become NaN and are dropped
+    # by the existing QC filter below.
+    for _col in ("OR", "LOG(OR)_SE", "SE", "P", "Z_STAT", "T_STAT",
+                 "A1_FREQ", "MACH_R2", "OBS_CT"):
+        if _col in merged.columns and merged[_col].dtype == object:
+            merged[_col] = pd.to_numeric(merged[_col], errors="coerce")
+
     # Standardize variant ID: CHR:POS:REF:ALT
     # PLINK2 columns: #CHROM, POS, REF, ALT (or A1, AX)
     chrom_col = "#CHROM" if "#CHROM" in merged.columns else "CHROM"
